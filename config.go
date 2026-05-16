@@ -132,6 +132,13 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	// Defense-in-depth: the config file holds the VAPID private key (and
+	// potentially the auth password). It must be owner-read-only. If we
+	// find anything looser than 0600 (e.g. 0644 from a sloppy manual edit
+	// or a previous version), loudly warn and auto-chmod. We don't refuse
+	// to start — that bricks first-run boots — we just self-heal.
+	enforceConfigPerms(path)
+
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
@@ -214,5 +221,41 @@ func (c *Config) Save() error {
 	if dir := filepath.Dir(c.path); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	return os.WriteFile(c.path, data, 0o600)
+	if err := os.WriteFile(c.path, data, 0o600); err != nil {
+		return err
+	}
+	// Verify the write landed with 0600. Some filesystems (or a hostile
+	// umask interfering with os.WriteFile semantics on edge platforms)
+	// could leave looser perms; in that case force a chmod and warn so the
+	// operator notices.
+	if info, statErr := os.Stat(c.path); statErr == nil {
+		mode := info.Mode().Perm()
+		if mode != 0o600 && mode != 0o400 {
+			fmt.Fprintf(os.Stderr, "aurex: WARNING %s landed with mode %#o after write, forcing 0600\n", c.path, mode)
+			if chmodErr := os.Chmod(c.path, 0o600); chmodErr != nil {
+				return fmt.Errorf("chmod config after save: %w", chmodErr)
+			}
+		}
+	}
+	return nil
+}
+
+// enforceConfigPerms stats the config file and chmods it to 0600 if it's
+// looser than that. 0400 is also accepted as "stricter than 0600". Errors
+// during stat/chmod are logged but not fatal — boot ergonomics win over
+// strict enforcement for a single-user dev tool.
+func enforceConfigPerms(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aurex: WARNING could not stat %s for permission check: %v\n", path, err)
+		return
+	}
+	mode := info.Mode().Perm()
+	if mode == 0o600 || mode == 0o400 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "aurex: WARNING %s has insecure mode %#o (expected 0600); auto-correcting. This file contains the VAPID private key and must not be world-readable.\n", path, mode)
+	if err := os.Chmod(path, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "aurex: WARNING failed to chmod %s to 0600: %v — please fix manually\n", path, err)
+	}
 }
