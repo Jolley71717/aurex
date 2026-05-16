@@ -260,31 +260,9 @@ export default function Terminal({ onReady, onInput, onResize }) {
         // canvas doesn't expose a DOM scroll target on its own, so we drive
         // scrollLines manually. Cell height estimated from fontSize × lineHeight
         // (no DOM grid to measure against, unlike the old xterm.js setup).
-        //
-        // "Stick to user's position" behavior: while the user has scrolled
-        // away from the bottom, suppress the auto-scroll that term.write
-        // does on every new chunk. Without this, every output frame snaps
-        // the viewport back to the bottom — making scrollback unusable on
-        // mobile when an agent is streaming output.
         let touchStartY = null;
         let touchAccum = 0;
         const cellHeight = fontSize * 1.2;
-        // `userScrollAwayUntilTs` is a wall-clock deadline. While now < it,
-        // term.write is wrapped to preserve the user's viewport position.
-        // The deadline is pushed forward on every touchmove that scrolls up,
-        // and is cleared when the user scrolls back to the bottom.
-        let userScrollAwayUntilTs = 0;
-        const STICK_DECAY_MS = 5_000;
-        const isAtBottom = () => {
-          try {
-            const buf = term.buffer?.active;
-            if (!buf) return true;
-            // viewportY === baseY means scrollback is at the live cursor row.
-            return buf.viewportY >= buf.baseY;
-          } catch {
-            return true;
-          }
-        };
         termRef.current = term;
         const onTouchStart = (e) => {
           if (e.touches.length !== 1) return;
@@ -300,14 +278,6 @@ export default function Terminal({ onReady, onInput, onResize }) {
           if (steps === 0) return;
           try { term.scrollLines(steps); } catch {}
           touchAccum -= steps * cellHeight;
-          // After scrollLines, check whether the user is still scrolled up.
-          // If so, pin the "stick to position" window forward; if they're
-          // back at the bottom, drop the pin so auto-scroll resumes.
-          if (isAtBottom()) {
-            userScrollAwayUntilTs = 0;
-          } else {
-            userScrollAwayUntilTs = Date.now() + STICK_DECAY_MS;
-          }
         };
         const onTouchEnd = () => {
           touchStartY = null;
@@ -340,31 +310,39 @@ export default function Terminal({ onReady, onInput, onResize }) {
 
         // Wrapper around term.write that preserves the user's scrollback
         // position when they've scrolled away from the bottom. ghostty's
-        // term.write moves the cursor and (for output that wraps the last
-        // row) emits scrolls that snap viewportY=baseY. By capturing
-        // viewportY pre-write and restoring it post-write while the
-        // "stick" deadline is active, the user's history view stays put
-        // through a stream of incoming chunks.
+        // term.write auto-scrolls viewportY=baseY on every chunk, which
+        // snaps the user back to live whenever a Claude TUI redraws (and
+        // it redraws many times per second). The fix: measure the user's
+        // line-offset from the bottom BEFORE the write, then preserve that
+        // same offset AFTER the write. If they were at the bottom, the
+        // delta is 0 and auto-scroll just happens normally. If they were
+        // N lines up, they stay N lines up regardless of how much new
+        // content streamed in.
+        //
+        // No touch tracking, no timer, no decay. Position is the source
+        // of truth — if the user scrolls back to the bottom, they get the
+        // live view; if they stay scrolled up, they stay scrolled up.
         const writeKeepingPosition = (s) => {
-          if (Date.now() >= userScrollAwayUntilTs) {
-            // Either user is at bottom or the stick window has decayed —
-            // let normal auto-scroll happen.
-            term.write(s);
-            return;
-          }
-          let savedViewportY = null;
+          let linesFromBottom = 0;
+          let wasAtBottom = true;
           try {
-            savedViewportY = term.buffer?.active?.viewportY ?? null;
+            const buf = term.buffer?.active;
+            if (buf) {
+              wasAtBottom = buf.viewportY >= buf.baseY;
+              linesFromBottom = Math.max(0, buf.baseY - buf.viewportY);
+            }
           } catch {}
+
           term.write(s);
-          if (savedViewportY != null) {
-            try {
-              const baseY = term.buffer?.active?.baseY ?? 0;
-              const target = Math.min(savedViewportY, baseY);
-              const delta = target - (term.buffer?.active?.viewportY ?? target);
-              if (delta !== 0) term.scrollLines(delta);
-            } catch {}
-          }
+
+          if (wasAtBottom) return;
+          try {
+            const buf = term.buffer?.active;
+            if (!buf) return;
+            const targetViewportY = Math.max(0, buf.baseY - linesFromBottom);
+            const delta = targetViewportY - buf.viewportY;
+            if (delta !== 0) term.scrollLines(delta);
+          } catch {}
         };
 
         onReady?.({
