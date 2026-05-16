@@ -13,6 +13,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,20 +117,66 @@ const sessionCookieName = "aurex_session"
 // on its own. Each successful request refreshes it.
 const sessionTTL = 30 * 24 * time.Hour
 
-// sessionSecret is process-local — restarting aurex invalidates all
-// outstanding cookies. Good: kicks every device on rotation, no secret
-// to manage on disk.
-var sessionSecret = func() []byte {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		// Fallback won't ever happen in practice (crypto/rand failing
-		// on Linux/macOS means the OS is broken), but be paranoid.
-		panic("aurex: crypto/rand unavailable: " + err.Error())
-	}
-	return b
-}()
+// sessionSecret is the HMAC key for signed session cookies. Initialized
+// by InitSessionSecret() from main — persisted to disk so process restarts
+// don't invalidate every logged-in device.
+//
+// To force-kick every session (e.g. after a suspected compromise), delete
+// the on-disk secret file and restart aurex. A fresh key will be generated
+// and every old cookie will fail HMAC verification.
+var sessionSecret []byte
 
 var sessionMu sync.RWMutex
+
+// InitSessionSecret loads the HMAC secret from path, generating + persisting
+// a new 32-byte key if the file is missing or unreadable. Called from main()
+// after config load. Safe to call only once at startup.
+//
+// Persistence is best-effort: if the write fails (read-only fs, permissions),
+// aurex still boots with the in-memory key, but the secret won't survive
+// the next restart. We log a warning in that case so it's visible.
+func InitSessionSecret(path string) error {
+	if path == "" {
+		// Caller didn't configure a path — fall back to ephemeral (old
+		// behavior). Still works, just kicks everyone on restart.
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return fmt.Errorf("crypto/rand: %w", err)
+		}
+		sessionMu.Lock()
+		sessionSecret = b
+		sessionMu.Unlock()
+		return nil
+	}
+
+	if data, err := os.ReadFile(path); err == nil && len(data) == 32 {
+		sessionMu.Lock()
+		sessionSecret = data
+		sessionMu.Unlock()
+		return nil
+	}
+
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Errorf("crypto/rand: %w", err)
+	}
+	sessionMu.Lock()
+	sessionSecret = b
+	sessionMu.Unlock()
+
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("aurex: session-secret mkdir %s: %v (sessions won't survive restart)", dir, err)
+			return nil
+		}
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		log.Printf("aurex: failed to persist session-secret to %s: %v (sessions won't survive restart)", path, err)
+		return nil
+	}
+	log.Printf("aurex: session-secret persisted to %s", path)
+	return nil
+}
 
 // signSession returns a base64url(payload "|" hmac(payload)) where payload
 // is "<username>|<expiry-unix-seconds>". Constant-time on verify.

@@ -78,6 +78,12 @@ type Config struct {
 	// if you reach aurex from a different vanity DNS name.
 	AllowedOrigins []string `json:"allowedOrigins"`
 
+	// SessionSecretFile is the path where the HMAC key for signed session
+	// cookies is persisted, so process restarts don't invalidate every
+	// logged-in device. Created mode 0600 on first boot. Empty falls back
+	// to ephemeral (in-memory) keys — restart kicks everyone.
+	SessionSecretFile string `json:"sessionSecretFile"`
+
 	path string
 }
 
@@ -107,6 +113,7 @@ func LoadConfig() (*Config, error) {
 		AllowedOrigins:        nil,
 		PasteDir:              "pastes",
 		PasteMaxAgeHours:      24,
+		SessionSecretFile:     "aurex.session-secret",
 		path:                  path,
 	}
 
@@ -171,6 +178,10 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.PasteMaxAgeHours == 0 {
 		cfg.PasteMaxAgeHours = 24
+		dirty = true
+	}
+	if cfg.SessionSecretFile == "" {
+		cfg.SessionSecretFile = "aurex.session-secret"
 		dirty = true
 	}
 	if cfg.SilenceSeconds <= 0 {
