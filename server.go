@@ -1,8 +1,13 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -10,6 +15,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -96,17 +103,123 @@ func (s *Server) Routes() http.Handler {
 	return r
 }
 
-func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	if !s.cfg.Auth {
-		return next
+// sessionCookieName is the cookie set after a successful basic-auth so
+// subsequent requests skip the WWW-Authenticate prompt. iOS Safari drops
+// basic-auth cache aggressively (every app switch); this cookie outlives
+// that and keeps the PWA usable.
+const sessionCookieName = "aurex_session"
+
+// sessionTTL is how long the session cookie persists. Long enough to feel
+// "stay signed in" but short enough that a stolen device session expires
+// on its own. Each successful request refreshes it.
+const sessionTTL = 30 * 24 * time.Hour
+
+// sessionSecret is process-local — restarting aurex invalidates all
+// outstanding cookies. Good: kicks every device on rotation, no secret
+// to manage on disk.
+var sessionSecret = func() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback won't ever happen in practice (crypto/rand failing
+		// on Linux/macOS means the OS is broken), but be paranoid.
+		panic("aurex: crypto/rand unavailable: " + err.Error())
 	}
+	return b
+}()
+
+var sessionMu sync.RWMutex
+
+// signSession returns a base64url(payload "|" hmac(payload)) where payload
+// is "<username>|<expiry-unix-seconds>". Constant-time on verify.
+func signSession(username string) string {
+	exp := time.Now().Add(sessionTTL).Unix()
+	payload := fmt.Sprintf("%s|%d", username, exp)
+	sessionMu.RLock()
+	mac := hmac.New(sha256.New, sessionSecret)
+	sessionMu.RUnlock()
+	mac.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func verifySession(token, expectedUser string) bool {
+	parts := strings.SplitN(token, ".", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	want, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	sessionMu.RLock()
+	mac := hmac.New(sha256.New, sessionSecret)
+	sessionMu.RUnlock()
+	mac.Write(payload)
+	if !hmac.Equal(want, mac.Sum(nil)) {
+		return false
+	}
+	pieces := strings.SplitN(string(payload), "|", 2)
+	if len(pieces) != 2 {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(pieces[0]), []byte(expectedUser)) != 1 {
+		return false
+	}
+	exp, err := strconv.ParseInt(pieces[1], 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return false
+	}
+	return true
+}
+
+// setSessionCookie writes the HMAC'd session cookie. HttpOnly so JS can't
+// see it; Secure so it only flows over TLS; SameSite=Lax so it survives
+// normal same-site navigation.
+func setSessionCookie(w http.ResponseWriter, username string, https bool) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    signSession(username),
+		Path:     "/",
+		Expires:  time.Now().Add(sessionTTL),
+		MaxAge:   int(sessionTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   https,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// authPass is the shared check used by both the HTTP API middleware and
+// the WS upgrade handler. Returns true if the request is authenticated
+// via either a valid session cookie OR valid basic auth credentials.
+// In the basic-auth-success case it also issues a session cookie so the
+// next navigation doesn't re-prompt.
+func (s *Server) authPass(w http.ResponseWriter, r *http.Request) bool {
+	if !s.cfg.Auth {
+		return true
+	}
+	if c, err := r.Cookie(sessionCookieName); err == nil && verifySession(c.Value, s.cfg.Username) {
+		// Rolling refresh — extends the expiry on every authenticated hit.
+		setSessionCookie(w, s.cfg.Username, r.TLS != nil)
+		return true
+	}
+	u, p, ok := r.BasicAuth()
+	if !ok ||
+		subtle.ConstantTimeCompare([]byte(u), []byte(s.cfg.Username)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(p), []byte(s.cfg.Password)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Basic realm="aurex"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	setSessionCookie(w, s.cfg.Username, r.TLS != nil)
+	return true
+}
+
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		if !ok ||
-			subtle.ConstantTimeCompare([]byte(u), []byte(s.cfg.Username)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(p), []byte(s.cfg.Password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="aurex"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !s.authPass(w, r) {
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -114,16 +227,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) authWS(h http.HandlerFunc) http.HandlerFunc {
-	if !s.cfg.Auth {
-		return h
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		if !ok ||
-			subtle.ConstantTimeCompare([]byte(u), []byte(s.cfg.Username)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(p), []byte(s.cfg.Password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="aurex"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !s.authPass(w, r) {
 			return
 		}
 		h(w, r)
