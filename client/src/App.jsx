@@ -267,12 +267,23 @@ export default function App() {
               onInput={handleTermInput}
               onResize={handleResize}
             />
-            {/* Mobile-only toolbar — desktop keyboards already have these keys. */}
+            {/* Full toolbar on mobile (helper keys + paste). Desktop keyboards have
+                ESC/TAB/arrows/CTRL natively, so we hide those there — but desktop
+                still needs PASTE because Cmd+V doesn't transport clipboard images
+                (only text). */}
             <div className="md:hidden">
               <Toolbar
                 onSendKey={handleToolbarKey}
                 ctrlArmed={ctrlArmed}
                 onCtrlArm={() => setCtrlArmed((v) => !v)}
+              />
+            </div>
+            <div className="hidden md:block">
+              <Toolbar
+                onSendKey={handleToolbarKey}
+                ctrlArmed={ctrlArmed}
+                onCtrlArm={() => setCtrlArmed((v) => !v)}
+                desktop
               />
             </div>
           </>
