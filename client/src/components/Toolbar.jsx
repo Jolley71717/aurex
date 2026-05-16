@@ -45,26 +45,88 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed }) {
     // Modern Clipboard API requires a secure context (https/localhost) AND a
     // user gesture (this click counts). iOS Safari additionally pops its own
     // "Allow Paste" prompt the first time per session.
-    if (!navigator.clipboard || !navigator.clipboard.readText) {
+    //
+    // We try navigator.clipboard.read() FIRST so we can offer image-paste —
+    // it returns ClipboardItem[] with MIME types. Fall back to readText()
+    // if read() isn't there (older browsers).
+    if (!navigator.clipboard) {
       setPasteStatus('unsupported');
       setTimeout(() => setPasteStatus(null), 1500);
       return;
     }
+
+    const flashAndClear = (status, ms = 1500) => {
+      setPasteStatus(status);
+      setTimeout(() => setPasteStatus(null), ms);
+    };
+
     try {
+      // ClipboardItem path — picks up images.
+      if (navigator.clipboard.read) {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          // Prefer image types if present (the screenshot case).
+          const imgType = item.types.find((t) => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await item.getType(imgType);
+            const res = await fetch('/api/paste/image', {
+              method: 'POST',
+              headers: { 'Content-Type': blob.type || 'image/png' },
+              body: blob,
+              credentials: 'include',
+            });
+            if (!res.ok) {
+              flashAndClear('uploaderr');
+              return;
+            }
+            const data = await res.json().catch(() => null);
+            if (!data || !data.path) {
+              flashAndClear('uploaderr');
+              return;
+            }
+            // Type the absolute path into the terminal so downstream tools
+            // (Claude Code, vim+iTerm-image-render, etc.) can open it. The
+            // trailing space gives the shell a delimiter so the path doesn't
+            // glue onto whatever's typed next.
+            onSendKey(data.path + ' ');
+            flashAndClear('ok', 600);
+            return;
+          }
+        }
+        // No image item — fall through to text inspection.
+        for (const item of items) {
+          if (item.types.includes('text/plain')) {
+            const blob = await item.getType('text/plain');
+            const text = await blob.text();
+            if (!text) {
+              flashAndClear('empty', 1200);
+              return;
+            }
+            onSendKey(text);
+            flashAndClear('ok', 600);
+            return;
+          }
+        }
+        flashAndClear('empty', 1200);
+        return;
+      }
+
+      // Fallback path — older browsers that only ship readText.
+      if (!navigator.clipboard.readText) {
+        flashAndClear('unsupported');
+        return;
+      }
       const text = await navigator.clipboard.readText();
       if (!text) {
-        setPasteStatus('empty');
-        setTimeout(() => setPasteStatus(null), 1200);
+        flashAndClear('empty', 1200);
         return;
       }
       onSendKey(text);
-      setPasteStatus('ok');
-      setTimeout(() => setPasteStatus(null), 600);
+      flashAndClear('ok', 600);
     } catch (err) {
       // iOS shows the permission prompt and throws here if user taps Deny,
       // or if no user gesture is registered. Either way: tell them.
-      setPasteStatus('denied');
-      setTimeout(() => setPasteStatus(null), 1500);
+      flashAndClear('denied');
     }
   };
 
@@ -74,12 +136,13 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed }) {
       case 'empty':       return 'Empty';
       case 'denied':      return 'Denied';
       case 'unsupported': return 'N/A';
+      case 'uploaderr':   return 'Upload?';
       default:            return 'PASTE';
     }
   })();
   const pasteTone = pasteStatus === 'ok'
     ? 'border-aura bg-aura/15 text-aura'
-    : pasteStatus === 'denied' || pasteStatus === 'unsupported'
+    : pasteStatus === 'denied' || pasteStatus === 'unsupported' || pasteStatus === 'uploaderr'
     ? 'border-red-500 bg-red-500/15 text-red-300'
     : pasteStatus === 'empty'
     ? 'border-yellow-500 bg-yellow-500/15 text-yellow-300'
