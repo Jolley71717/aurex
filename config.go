@@ -66,6 +66,24 @@ type Config struct {
 	// builds or thinking phases are creating false positives.
 	SilenceSeconds int `json:"silenceSeconds"`
 
+	// BindAddr restricts the listener to a single interface address. Empty
+	// means listen on all interfaces (the upstream default). Set to a
+	// Tailscale interface IP (e.g. "100.x.y.z") to keep aurex off your LAN
+	// entirely. The HTTP redirect listener honors the same address.
+	BindAddr string `json:"bindAddr"`
+
+	// AllowedOrigins is the WebSocket Origin allowlist. Empty means "the
+	// request's own Host header must match the Origin host" (the safest
+	// default — prevents cross-origin WS hijack). Add hostnames here only
+	// if you reach aurex from a different vanity DNS name.
+	AllowedOrigins []string `json:"allowedOrigins"`
+
+	// SessionSecretFile is the path where the HMAC key for signed session
+	// cookies is persisted, so process restarts don't invalidate every
+	// logged-in device. Created mode 0600 on first boot. Empty falls back
+	// to ephemeral (in-memory) keys — restart kicks everyone.
+	SessionSecretFile string `json:"sessionSecretFile"`
+
 	path string
 }
 
@@ -93,6 +111,9 @@ func LoadConfig() (*Config, error) {
 		SilenceSeconds:        5,
 		PasteDir:              "pastes",
 		PasteMaxAgeHours:      24,
+		BindAddr:              "",
+		AllowedOrigins:        nil,
+		SessionSecretFile:     "aurex.session-secret",
 		path:                  path,
 	}
 
@@ -157,6 +178,10 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.PasteMaxAgeHours == 0 {
 		cfg.PasteMaxAgeHours = 24
+		dirty = true
+	}
+	if cfg.SessionSecretFile == "" {
+		cfg.SessionSecretFile = "aurex.session-secret"
 		dirty = true
 	}
 	if cfg.SilenceSeconds <= 0 {

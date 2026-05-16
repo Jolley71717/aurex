@@ -30,6 +30,10 @@ func main() {
 		log.Fatalf("aurex: load config: %v", err)
 	}
 
+	if err := InitSessionSecret(cfg.SessionSecretFile); err != nil {
+		log.Fatalf("aurex: init session secret: %v", err)
+	}
+
 	if _, err := exec.LookPath("tmux"); err != nil {
 		log.Fatalf("aurex: tmux not found in PATH — install tmux to use aurex")
 	}
