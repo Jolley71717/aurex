@@ -47,7 +47,7 @@ func main() {
 	go store.PollMetadata(3*time.Second, stop)
 	go store.PollIdle(stop)
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	addr := fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port)
 	httpServer := &http.Server{
 		Addr:     addr,
 		Handler:  server.Routes(),
@@ -71,17 +71,21 @@ func main() {
 	// on their phone.
 	useTLS, certFile, keyFile, publicURL := resolveTailscaleCert(cfg, stop)
 
+	bindLabel := cfg.BindAddr
+	if bindLabel == "" {
+		bindLabel = "0.0.0.0"
+	}
 	switch {
 	case useTLS:
-		log.Printf("aurex: open %s on your phone — real cert, no warnings", publicURL)
+		log.Printf("aurex: bound to %s — open %s on your phone — real cert, no warnings", bindLabel, publicURL)
 	case cfg.Tailscale == "on":
 		log.Fatalf("aurex: tailscale required (cfg.tailscale=on) but unavailable")
 	default:
-		log.Printf("aurex: listening on http://0.0.0.0:%d — install Tailscale and set HTTPS in the admin console for push notifications", cfg.Port)
+		log.Printf("aurex: listening on http://%s:%d — install Tailscale and set HTTPS in the admin console for push notifications", bindLabel, cfg.Port)
 	}
 
 	if useTLS && cfg.HTTPRedirectPort > 0 {
-		go runHTTPRedirect(cfg.HTTPRedirectPort, cfg.Port)
+		go runHTTPRedirect(cfg.BindAddr, cfg.HTTPRedirectPort, cfg.Port)
 	}
 
 	var serveErr error
@@ -141,8 +145,9 @@ func (quietTLSWriter) Write(p []byte) (int, error) {
 }
 
 // runHTTPRedirect serves an HTTP-only listener that 301-redirects everything
-// to the same host on the HTTPS port.
-func runHTTPRedirect(httpPort, httpsPort int) {
+// to the same host on the HTTPS port. Honors bindAddr so the redirect
+// listener doesn't leak onto interfaces aurex was kept off of.
+func runHTTPRedirect(bindAddr string, httpPort, httpsPort int) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil || host == "" {
@@ -151,8 +156,8 @@ func runHTTPRedirect(httpPort, httpsPort int) {
 		target := fmt.Sprintf("https://%s:%d%s", host, httpsPort, r.RequestURI)
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	})
-	addr := fmt.Sprintf(":%d", httpPort)
-	log.Printf("aurex: HTTP→HTTPS redirect listening on :%d", httpPort)
+	addr := fmt.Sprintf("%s:%d", bindAddr, httpPort)
+	log.Printf("aurex: HTTP→HTTPS redirect listening on %s", addr)
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Printf("aurex: http redirect server: %v (continuing without redirect)", err)
 	}

@@ -45,6 +45,18 @@ type Config struct {
 	// builds or thinking phases are creating false positives.
 	SilenceSeconds int `json:"silenceSeconds"`
 
+	// BindAddr restricts the listener to a single interface address. Empty
+	// means listen on all interfaces (the upstream default). Set to a
+	// Tailscale interface IP (e.g. "100.x.y.z") to keep aurex off your LAN
+	// entirely. The HTTP redirect listener honors the same address.
+	BindAddr string `json:"bindAddr"`
+
+	// AllowedOrigins is the WebSocket Origin allowlist. Empty means "the
+	// request's own Host header must match the Origin host" (the safest
+	// default — prevents cross-origin WS hijack). Add hostnames here only
+	// if you reach aurex from a different vanity DNS name.
+	AllowedOrigins []string `json:"allowedOrigins"`
+
 	path string
 }
 
@@ -59,9 +71,9 @@ func LoadConfig() (*Config, error) {
 	path := defaultConfigPath()
 	cfg := &Config{
 		Port:                  7681,
-		Auth:                  false,
+		Auth:                  true,
 		Username:              "aurex",
-		Password:              "changeme",
+		Password:              "", // populated from AUREX_PASSWORD env at boot
 		DefaultShell:          "bash",
 		TmuxPrefix:            "aurex",
 		HTTPRedirectPort:      7680,
@@ -70,6 +82,8 @@ func LoadConfig() (*Config, error) {
 		TailscaleKeyFile:      "aurex.ts.key.pem",
 		PushSubscriptionsFile: "aurex.subscriptions.json",
 		SilenceSeconds:        5,
+		BindAddr:              "",
+		AllowedOrigins:        nil,
 		path:                  path,
 	}
 
@@ -82,7 +96,7 @@ func LoadConfig() (*Config, error) {
 			return nil, err
 		}
 		fmt.Printf("aurex: wrote default config to %s\n", path)
-		return cfg, nil
+		return applyEnvAndValidate(cfg, path)
 	}
 	if err != nil {
 		return nil, err
@@ -137,6 +151,30 @@ func LoadConfig() (*Config, error) {
 			return nil, err
 		}
 	}
+	return applyEnvAndValidate(cfg, path)
+}
+
+// applyEnvAndValidate layers AUREX_PASSWORD onto the loaded config and
+// refuses to return a config that would start aurex in a known-broken
+// auth state. Called from both the first-run and existing-config branches
+// so the env-overlay + safety check happen exactly once.
+func applyEnvAndValidate(cfg *Config, path string) (*Config, error) {
+	// AUREX_PASSWORD env var wins over the config file value. Lets the
+	// password come from 1Password / a secret manager without ever landing
+	// on disk. Empty env => fall through to the file value.
+	if envPw := os.Getenv("AUREX_PASSWORD"); envPw != "" {
+		cfg.Password = envPw
+	}
+
+	if cfg.Auth {
+		if cfg.Password == "" {
+			return nil, fmt.Errorf("aurex: auth is enabled but password is empty — set AUREX_PASSWORD or write a password into %s", path)
+		}
+		if cfg.Password == "changeme" {
+			return nil, fmt.Errorf("aurex: refusing to start with the default password \"changeme\" — set AUREX_PASSWORD or edit %s", path)
+		}
+	}
+
 	return cfg, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -23,18 +24,51 @@ type Server struct {
 }
 
 func NewServer(cfg *Config, store *SessionStore, push *PushManager, frontend fs.FS) *Server {
-	return &Server{
+	s := &Server{
 		cfg:      cfg,
 		store:    store,
 		push:     push,
 		frontend: frontend,
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:  4096,
-			WriteBufferSize: 4096,
-			// Local-network tool — we don't enforce origin.
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
 	}
+	s.upgrader = websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin:     s.checkWSOrigin,
+	}
+	return s
+}
+
+// checkWSOrigin enforces same-host or allowlisted-host on WebSocket upgrades.
+// Default policy: the request's Origin header host must equal its Host header
+// host (the browser served the page from the same place it's now WS-ing to).
+// This blocks DNS-rebinding and cross-origin WS hijack from a malicious tab
+// on a tailnet device, which the Tailscale network boundary alone does NOT
+// prevent.
+//
+// If Origin is missing, we reject. Non-browser clients (curl, wscat) can
+// supply an Origin header explicitly — that's a deliberate choice to require
+// callers to opt into the trust boundary instead of getting it for free.
+//
+// cfg.AllowedOrigins, when non-empty, replaces the same-host rule with an
+// exact-match allowlist of `scheme://host[:port]` URLs.
+func (s *Server) checkWSOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if len(s.cfg.AllowedOrigins) > 0 {
+		for _, allowed := range s.cfg.AllowedOrigins {
+			if strings.EqualFold(strings.TrimRight(allowed, "/"), strings.TrimRight(origin, "/")) {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
 }
 
 func (s *Server) Routes() http.Handler {
