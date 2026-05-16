@@ -127,6 +127,20 @@ export default function Terminal({ onReady, onInput, onResize }) {
         const onKeyDownCap = (e) => {
           lastKeyAt = performance.now();
           lastKeyHadValue = !!(e.key && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey);
+          // Intercept Cmd+V / Ctrl+V before ghostty's keymap sees them.
+          // ghostty-web 0.4 binds Meta+V (and Ctrl+V) to an internal action
+          // that emits a stray character ("o" in practice on macOS) — we need
+          // its keydown handler to never run for the paste shortcut. We
+          // stopImmediatePropagation (so ghostty's bubble-phase listener
+          // doesn't fire) but do NOT preventDefault, so the browser still
+          // dispatches its native 'paste' event for our handler below to
+          // route (text → beforeinput insertFromPaste, image → /api/paste/image).
+          if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+            const key = (e.key || '').toLowerCase();
+            if (key === 'v') {
+              e.stopImmediatePropagation();
+            }
+          }
         };
         const onBeforeInput = (e) => {
           const recentRealKey = performance.now() - lastKeyAt < 50 && lastKeyHadValue;
