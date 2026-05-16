@@ -21,11 +21,15 @@ function ctrlOf(ch) {
 }
 
 /**
- * Mobile toolbar. Buttons use tabIndex=-1 plus preventDefault on
- * mousedown/touchstart so they can never steal focus from xterm's hidden
- * textarea — the soft keyboard stays up across taps.
+ * Toolbar. Buttons use tabIndex=-1 plus preventDefault on mousedown/touchstart
+ * so they can never steal focus from xterm's hidden textarea — the soft
+ * keyboard stays up across taps on mobile.
+ *
+ * `desktop` mode renders only the PASTE button (desktop keyboards have
+ * ESC/TAB/arrows/CTRL natively, but Cmd+V can't transport clipboard images
+ * so PASTE is still useful for screenshots).
  */
-export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed }) {
+export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed, desktop = false }) {
   const [pressed, setPressed] = useState(null);
   // pasteStatus: null | 'ok' | 'empty' | 'denied' | 'unsupported'
   // Drives the brief flash colour on the Paste button so the user gets
@@ -153,20 +157,22 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed }) {
       className="flex shrink-0 flex-wrap items-center gap-1 border-t border-line bg-panel px-2 py-2"
       style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}
     >
-      <button
-        tabIndex={-1}
-        onMouseDown={noFocusSteal}
-        onTouchStart={noFocusSteal}
-        onClick={onCtrlArm}
-        className={[
-          'shrink-0 rounded-md border px-3 py-2 text-xs font-mono',
-          ctrlArmed
-            ? 'border-aura bg-aura/15 text-aura'
-            : 'border-line bg-bg text-zinc-200 active:bg-zinc-800',
-        ].join(' ')}
-      >
-        CTRL
-      </button>
+      {!desktop && (
+        <button
+          tabIndex={-1}
+          onMouseDown={noFocusSteal}
+          onTouchStart={noFocusSteal}
+          onClick={onCtrlArm}
+          className={[
+            'shrink-0 rounded-md border px-3 py-2 text-xs font-mono',
+            ctrlArmed
+              ? 'border-aura bg-aura/15 text-aura'
+              : 'border-line bg-bg text-zinc-200 active:bg-zinc-800',
+          ].join(' ')}
+        >
+          CTRL
+        </button>
+      )}
       <button
         tabIndex={-1}
         onMouseDown={noFocusSteal}
@@ -179,7 +185,7 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed }) {
       >
         {pasteLabel}
       </button>
-      {KEYS.map((k) => (
+      {!desktop && KEYS.map((k) => (
         <button
           key={k.label}
           tabIndex={-1}
