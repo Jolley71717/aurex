@@ -108,6 +108,7 @@ export default function Sidebar({
   pushIsSecure,
   connected,
   onOpenPush,
+  onOpenIdeas,
   open,
   onClose,
 }) {
@@ -203,6 +204,16 @@ export default function Sidebar({
         {/* Footer: push status + connection dot.
             On mobile the same info is in the header; this is also the desktop
             display since the desktop header is hidden. */}
+        {onOpenIdeas && (
+          <button
+            onClick={onOpenIdeas}
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => e.preventDefault()}
+            className="mt-3 rounded-md border border-line bg-bg px-3 py-2 text-left text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
+          >
+            💡 Ideas inbox
+          </button>
+        )}
         <div className="flex items-center gap-2 border-t border-line pt-3">
           <button
             onClick={onOpenPush}

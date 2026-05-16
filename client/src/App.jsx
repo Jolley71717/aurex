@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar.jsx';
 import Terminal from './components/Terminal.jsx';
 import Toolbar, { ctrlOf } from './components/Toolbar.jsx';
 import PushPanel from './components/PushPanel.jsx';
+import IdeasPage from './components/IdeasPage.jsx';
 import { useSession } from './hooks/useSession.js';
 import { usePush } from './hooks/usePush.js';
 
@@ -47,7 +48,33 @@ function useKeyboardInset() {
   }, []);
 }
 
+// useSurface picks between the terminal and the /ideas page based on the URL
+// path. We listen for popstate (back button) and patch the navigate helpers
+// to update the bar without a full reload — keeps the WS + push state intact
+// when the user toggles between surfaces.
+function useSurface() {
+  const compute = () =>
+    typeof window !== 'undefined' && window.location.pathname.startsWith('/ideas')
+      ? 'ideas'
+      : 'terminal';
+  const [surface, setSurface] = useState(compute);
+  useEffect(() => {
+    const onPop = () => setSurface(compute());
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+  const navigate = useCallback((next) => {
+    const target = next === 'ideas' ? '/ideas' : '/';
+    if (window.location.pathname !== target) {
+      window.history.pushState({}, '', target + window.location.search);
+    }
+    setSurface(next);
+  }, []);
+  return [surface, navigate];
+}
+
 export default function App() {
+  const [surface, navigate] = useSurface();
   const [sessions, setSessions] = useState([]);
   const [activeId, setActiveId] = useState(getInitialSessionId());
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -186,6 +213,10 @@ export default function App() {
     [sendInput]
   );
 
+  if (surface === 'ideas') {
+    return <IdeasPage onExit={() => navigate('terminal')} />;
+  }
+
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-zinc-100">
       <Sidebar
@@ -199,6 +230,7 @@ export default function App() {
         pushIsSecure={push.isSecure}
         connected={connected}
         onOpenPush={() => setPushPanelOpen(true)}
+        onOpenIdeas={() => navigate('ideas')}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
@@ -221,6 +253,15 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 text-xs">
+            <button
+              onClick={() => navigate('ideas')}
+              onMouseDown={(e) => e.preventDefault()}
+              onTouchStart={(e) => e.preventDefault()}
+              className="rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              title="Ideas inbox"
+            >
+              ideas
+            </button>
             <button
               onClick={() => setPushPanelOpen(true)}
               onMouseDown={(e) => e.preventDefault()}

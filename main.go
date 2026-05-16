@@ -44,6 +44,11 @@ func main() {
 		log.Printf("aurex: adopt existing tmux sessions: %v", err)
 	}
 
+	var ideas *IdeasManager
+	if cfg.IdeasDataRoot != "" {
+		ideas = NewIdeasManager(cfg.IdeasDataRoot, cfg.IdeasRepoRoot)
+		log.Printf("aurex: ideas surface enabled at %s (repo: %s)", cfg.IdeasDataRoot, cfg.IdeasRepoRoot)
+	}
 	// Agents surface — only enable if the configured Claude data root actually
 	// exists on disk at boot. Saves a "directory not found" error on every
 	// /api/agents poll for users who don't run `claude agents`.
@@ -60,7 +65,7 @@ func main() {
 			log.Printf("aurex: agents surface disabled (%s not found)", cfg.ClaudeAgentsDataRoot)
 		}
 	}
-	server := NewServer(cfg, store, push, agents, Frontend())
+	server := NewServer(cfg, store, push, ideas, agents, Frontend())
 	store.SetOnUpdate(server.BroadcastSessionUpdate)
 
 	stop := make(chan struct{})

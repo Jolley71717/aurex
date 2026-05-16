@@ -84,6 +84,15 @@ type Config struct {
 	// to ephemeral (in-memory) keys — restart kicks everyone.
 	SessionSecretFile string `json:"sessionSecretFile"`
 
+	// IdeasDataRoot is the absolute path to the directory holding the
+	// per-persona JSONL idea files (e.g. unchained-0-projectPlan/ideas).
+	// IdeasRepoRoot is the absolute path to the git repo root that contains
+	// it — used as the cwd for `git commit` + `git push` when persona
+	// prompts are saved, and for `bd create` when an idea is accepted.
+	// Empty values disable the /api/ideas surface entirely.
+	IdeasDataRoot string `json:"ideasDataRoot"`
+	IdeasRepoRoot string `json:"ideasRepoRoot"`
+
 	// ClaudeAgentsDataRoot is the directory holding Claude Code's local
 	// agent state — typically $HOME/.claude. The /api/agents surface reads
 	// roster.json + per-agent state.json from inside this tree. Set to
