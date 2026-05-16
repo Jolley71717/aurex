@@ -39,6 +39,16 @@ type Config struct {
 
 	PushSubscriptionsFile string `json:"pushSubscriptionsFile"`
 
+	// PasteDir is where the image-paste upload endpoint writes incoming
+	// screenshots. The terminal pane then types the absolute path so
+	// downstream tools (Claude Code, vim, etc.) can open the file.
+	// Empty defaults to "pastes" relative to the working dir.
+	PasteDir string `json:"pasteDir"`
+
+	// PasteMaxAgeHours: files in PasteDir with mtime older than this are
+	// reaped by a janitor goroutine. 0 = disabled (no cleanup). Default 24.
+	PasteMaxAgeHours int `json:"pasteMaxAgeHours"`
+
 	// SilenceSeconds: how long a pane has to be quiet before aurex fires its
 	// "agent waiting" aura. Backed by tmux's monitor-silence + alert-silence
 	// hook so it requires no agent-side config. Tune up if long-running
@@ -70,6 +80,8 @@ func LoadConfig() (*Config, error) {
 		TailscaleKeyFile:      "aurex.ts.key.pem",
 		PushSubscriptionsFile: "aurex.subscriptions.json",
 		SilenceSeconds:        5,
+		PasteDir:              "pastes",
+		PasteMaxAgeHours:      24,
 		path:                  path,
 	}
 
@@ -126,6 +138,14 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.PushSubscriptionsFile == "" {
 		cfg.PushSubscriptionsFile = "aurex.subscriptions.json"
+		dirty = true
+	}
+	if cfg.PasteDir == "" {
+		cfg.PasteDir = "pastes"
+		dirty = true
+	}
+	if cfg.PasteMaxAgeHours == 0 {
+		cfg.PasteMaxAgeHours = 24
 		dirty = true
 	}
 	if cfg.SilenceSeconds <= 0 {

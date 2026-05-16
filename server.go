@@ -53,6 +53,7 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/push/vapid-public-key", s.handleVapidPublicKey)
 		r.Post("/push/subscribe", s.handleSubscribe)
 		r.Post("/push/test", s.handlePushTest)
+		r.Post("/paste/image", s.pasteHandler)
 	})
 
 	// Hook endpoint is intentionally NOT behind auth — it gates on localhost instead.
