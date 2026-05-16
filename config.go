@@ -37,6 +37,17 @@ type Config struct {
 	TailscaleCertFile string `json:"tailscaleCertFile"`
 	TailscaleKeyFile  string `json:"tailscaleKeyFile"`
 
+	// TailscaleStaticFQDN is the MagicDNS hostname this server expects to
+	// be reached as. When the `tailscale` CLI is unreachable from the
+	// process context (notably: macOS LaunchAgents — the IPNExtension
+	// daemon's Mach port isn't accessible from launchd-spawned processes),
+	// aurex falls back to using the pre-fetched cert files at
+	// TailscaleCertFile/TailscaleKeyFile and uses this FQDN to build the
+	// public URL. Cert renewal in that mode is the caller's responsibility
+	// (e.g. a sibling LaunchAgent that runs `tailscale cert` from the user
+	// GUI session every N days).
+	TailscaleStaticFQDN string `json:"tailscaleStaticFQDN"`
+
 	PushSubscriptionsFile string `json:"pushSubscriptionsFile"`
 
 	// PasteDir is where the image-paste upload endpoint writes incoming

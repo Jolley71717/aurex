@@ -100,12 +100,29 @@ func main() {
 // for this node's MagicDNS FQDN. Returns useTLS=false on any failure unless
 // cfg.Tailscale == "on" (in which case the caller fatals). On success kicks
 // off the daily renewal goroutine.
+//
+// macOS launchd note: on macOS, the brew tailscale CLI cannot reach the
+// IPNExtension daemon when invoked from a launchd context (the Mach port
+// access just isn't there). Both `tailscale status` and `tailscale cert`
+// fail. If pre-fetched cert + key files exist at the configured paths
+// (populated by a user-context process — initial setup or a renewal
+// LaunchAgent), fall back to using them instead of dropping to HTTP. This
+// keeps push notifications working when aurex itself runs under launchd.
 func resolveTailscaleCert(cfg *Config, stop <-chan struct{}) (useTLS bool, certFile, keyFile, publicURL string) {
 	if cfg.Tailscale == "off" {
 		return false, "", "", ""
 	}
+
+	fallbackFQDN := cfg.TailscaleStaticFQDN
+	fallbackOK := fallbackFQDN != "" && certFilesReady(cfg.TailscaleCertFile, cfg.TailscaleKeyFile)
+	staticURL := func() string { return fmt.Sprintf("https://%s:%d", fallbackFQDN, cfg.Port) }
+
 	fqdn, err := TailscaleFQDN()
 	if err != nil {
+		if fallbackOK {
+			log.Printf("aurex: tailscale daemon unreachable (%v) — falling back to static cert for %s", err, fallbackFQDN)
+			return true, cfg.TailscaleCertFile, cfg.TailscaleKeyFile, staticURL()
+		}
 		if cfg.Tailscale == "on" {
 			log.Fatalf("aurex: tailscale required but unavailable: %v", err)
 		}
@@ -116,6 +133,10 @@ func resolveTailscaleCert(cfg *Config, stop <-chan struct{}) (useTLS bool, certF
 		return false, "", "", ""
 	}
 	if err := TailscaleEnsureCert(fqdn, cfg.TailscaleCertFile, cfg.TailscaleKeyFile); err != nil {
+		if fallbackOK {
+			log.Printf("aurex: tailscale cert refresh failed (%v) — using existing cert files for %s", err, fallbackFQDN)
+			return true, cfg.TailscaleCertFile, cfg.TailscaleKeyFile, staticURL()
+		}
 		if cfg.Tailscale == "on" {
 			log.Fatalf("aurex: tailscale cert required but failed: %v", err)
 		}
@@ -125,6 +146,23 @@ func resolveTailscaleCert(cfg *Config, stop <-chan struct{}) (useTLS bool, certF
 	log.Printf("aurex: using Tailscale cert for %s (auto-renew on restart)", fqdn)
 	go renewTailscaleCert(fqdn, cfg.TailscaleCertFile, cfg.TailscaleKeyFile, stop)
 	return true, cfg.TailscaleCertFile, cfg.TailscaleKeyFile, fmt.Sprintf("https://%s:%d", fqdn, cfg.Port)
+}
+
+// certFilesReady returns true when both cert and key files exist and are
+// non-empty. Used by the launchd-context fallback path.
+func certFilesReady(certPath, keyPath string) bool {
+	if certPath == "" || keyPath == "" {
+		return false
+	}
+	c, err := os.Stat(certPath)
+	if err != nil || c.Size() == 0 {
+		return false
+	}
+	k, err := os.Stat(keyPath)
+	if err != nil || k.Size() == 0 {
+		return false
+	}
+	return true
 }
 
 // quietTLSWriter drops TLS handshake noise (clients with stale/wrong certs,
