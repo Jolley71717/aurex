@@ -20,7 +20,7 @@ type OutputBuffer struct {
 
 func NewOutputBuffer(max int) *OutputBuffer {
 	if max <= 0 {
-		max = 2 << 20 // 2 MiB default (matches opencode)
+		max = 32 << 20 // 32 MiB default — long-running agent sessions emit a lot
 	}
 	return &OutputBuffer{max: max, data: make([]byte, 0, 64*1024)}
 }

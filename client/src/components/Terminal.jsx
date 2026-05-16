@@ -89,7 +89,13 @@ export default function Terminal({ onReady, onInput, onResize }) {
           fontFamily: 'JetBrains Mono, Fira Code, Menlo, ui-monospace, monospace',
           fontSize,
           cursorBlink: true,
-          scrollback: 10000,
+          // 100k lines of in-browser scrollback. xterm/ghostty stores
+          // these as JS strings on the heap; ~30 chars/line averages out
+          // to ~6 MB of browser memory which is fine on any device that
+          // can run Compose-for-Web. Pair this with the 32 MiB server-side
+          // ring buffer (see NewOutputBuffer in sessions.go) so a long
+          // reconnect replays into a buffer that can actually hold it.
+          scrollback: 100000,
         });
         const fit = new FitAddon();
         term.loadAddon(fit);

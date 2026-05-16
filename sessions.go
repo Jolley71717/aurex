@@ -139,7 +139,7 @@ func (s *SessionStore) Create(name string) (*Session, error) {
 		Name:       name,
 		TmuxName:   tmuxName,
 		CreatedAt:  time.Now().Unix(),
-		buffer:     NewOutputBuffer(2 << 20), // 2 MiB ring per session
+		buffer:     NewOutputBuffer(32 << 20), // 32 MiB ring per session
 		activeSubs: make(map[*Subscriber]bool),
 	}
 	if err := startSession(sess, s, s.push); err != nil {
@@ -170,7 +170,7 @@ func (s *SessionStore) AdoptExisting() error {
 			Name:       n,
 			TmuxName:   n,
 			CreatedAt:  time.Now().Unix(),
-			buffer:     NewOutputBuffer(2 << 20),
+			buffer:     NewOutputBuffer(32 << 20),
 			activeSubs: make(map[*Subscriber]bool),
 		}
 		// Idempotently enable mouse mode + disable status bar + allow OSC
