@@ -255,23 +255,15 @@ export default function App() {
               onInput={handleTermInput}
               onResize={handleResize}
             />
-            {/* Full toolbar on mobile (helper keys + paste). Desktop keyboards have
-                ESC/TAB/arrows/CTRL natively, so we hide those there — but desktop
-                still needs PASTE because Cmd+V doesn't transport clipboard images
-                (only text). */}
+            {/* Mobile-only toolbar — desktop's Cmd+V hits Terminal.jsx's
+                paste-event handler directly (which handles both text and
+                image clipboards), so desktop doesn't need the on-screen
+                button. */}
             <div className="md:hidden">
               <Toolbar
                 onSendKey={handleToolbarKey}
                 ctrlArmed={ctrlArmed}
                 onCtrlArm={() => setCtrlArmed((v) => !v)}
-              />
-            </div>
-            <div className="hidden md:block">
-              <Toolbar
-                onSendKey={handleToolbarKey}
-                ctrlArmed={ctrlArmed}
-                onCtrlArm={() => setCtrlArmed((v) => !v)}
-                desktop
               />
             </div>
           </>
