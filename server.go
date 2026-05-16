@@ -28,15 +28,17 @@ type Server struct {
 	cfg      *Config
 	store    *SessionStore
 	push     *PushManager
+	agents   *AgentsManager
 	frontend fs.FS // embedded React build (may be nil if not embedded yet)
 	upgrader websocket.Upgrader
 }
 
-func NewServer(cfg *Config, store *SessionStore, push *PushManager, frontend fs.FS) *Server {
+func NewServer(cfg *Config, store *SessionStore, push *PushManager, agents *AgentsManager, frontend fs.FS) *Server {
 	s := &Server{
 		cfg:      cfg,
 		store:    store,
 		push:     push,
+		agents:   agents,
 		frontend: frontend,
 	}
 	s.upgrader = websocket.Upgrader{
@@ -95,6 +97,9 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/push/subscribe", s.handleSubscribe)
 		r.Post("/push/test", s.handlePushTest)
 		r.Post("/paste/image", s.pasteHandler)
+		if s.agents != nil {
+			s.agents.RegisterRoutes(r)
+		}
 	})
 
 	// Hook endpoint is intentionally NOT behind auth — it gates on localhost instead.

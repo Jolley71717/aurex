@@ -44,7 +44,23 @@ func main() {
 		log.Printf("aurex: adopt existing tmux sessions: %v", err)
 	}
 
-	server := NewServer(cfg, store, push, Frontend())
+	// Agents surface — only enable if the configured Claude data root actually
+	// exists on disk at boot. Saves a "directory not found" error on every
+	// /api/agents poll for users who don't run `claude agents`.
+	var agents *AgentsManager
+	if cfg.ClaudeAgentsDataRoot != "" {
+		if info, err := os.Stat(cfg.ClaudeAgentsDataRoot); err == nil && info.IsDir() {
+			agents = NewAgentsManager(cfg.ClaudeAgentsDataRoot)
+			if agents.ClaudePath == "" {
+				log.Printf("aurex: agents surface enabled at %s (warning: `claude` CLI not on PATH — read works, stop/log won't)", cfg.ClaudeAgentsDataRoot)
+			} else {
+				log.Printf("aurex: agents surface enabled at %s (claude=%s)", cfg.ClaudeAgentsDataRoot, agents.ClaudePath)
+			}
+		} else {
+			log.Printf("aurex: agents surface disabled (%s not found)", cfg.ClaudeAgentsDataRoot)
+		}
+	}
+	server := NewServer(cfg, store, push, agents, Frontend())
 	store.SetOnUpdate(server.BroadcastSessionUpdate)
 
 	stop := make(chan struct{})

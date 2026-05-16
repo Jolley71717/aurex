@@ -84,6 +84,17 @@ type Config struct {
 	// to ephemeral (in-memory) keys — restart kicks everyone.
 	SessionSecretFile string `json:"sessionSecretFile"`
 
+	// ClaudeAgentsDataRoot is the directory holding Claude Code's local
+	// agent state — typically $HOME/.claude. The /api/agents surface reads
+	// roster.json + per-agent state.json from inside this tree. Set to
+	// empty (or point at a non-existent directory) to disable the agents
+	// surface entirely.
+	//
+	// LoadConfig() auto-populates this with $HOME/.claude on first run if
+	// that directory actually exists — that's the common case for a Mac
+	// running `claude agents` in the same user account as aurex.
+	ClaudeAgentsDataRoot string `json:"claudeAgentsDataRoot"`
+
 	path string
 }
 
@@ -92,6 +103,22 @@ func defaultConfigPath() string {
 		return p
 	}
 	return "aurex.config.json"
+}
+
+// defaultClaudeAgentsRoot returns $HOME/.claude if that directory exists,
+// or "" if it can't be resolved. The /api/agents surface activates only
+// when this is non-empty AND the path exists at boot — keeps the surface
+// silent on machines that don't run `claude agents`.
+func defaultClaudeAgentsRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	candidate := filepath.Join(home, ".claude")
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+	return ""
 }
 
 func LoadConfig() (*Config, error) {
@@ -114,6 +141,7 @@ func LoadConfig() (*Config, error) {
 		PasteDir:              "pastes",
 		PasteMaxAgeHours:      24,
 		SessionSecretFile:     "aurex.session-secret",
+		ClaudeAgentsDataRoot:  defaultClaudeAgentsRoot(),
 		path:                  path,
 	}
 
@@ -194,6 +222,16 @@ func LoadConfig() (*Config, error) {
 	if cfg.SilenceSeconds <= 0 {
 		cfg.SilenceSeconds = 5
 		dirty = true
+	}
+	// Backfill ClaudeAgentsDataRoot for existing configs. We never overwrite
+	// a non-empty value — if the user explicitly cleared it (or pointed it
+	// somewhere else) we respect that. Only the truly-missing case gets
+	// auto-populated from $HOME/.claude.
+	if cfg.ClaudeAgentsDataRoot == "" {
+		if def := defaultClaudeAgentsRoot(); def != "" {
+			cfg.ClaudeAgentsDataRoot = def
+			dirty = true
+		}
 	}
 	if dirty {
 		if err := cfg.Save(); err != nil {
