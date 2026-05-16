@@ -254,9 +254,32 @@ export default function Terminal({ onReady, onInput, onResize }) {
         // canvas doesn't expose a DOM scroll target on its own, so we drive
         // scrollLines manually. Cell height estimated from fontSize × lineHeight
         // (no DOM grid to measure against, unlike the old xterm.js setup).
+        //
+        // "Stick to user's position" behavior: while the user has scrolled
+        // away from the bottom, suppress the auto-scroll that term.write
+        // does on every new chunk. Without this, every output frame snaps
+        // the viewport back to the bottom — making scrollback unusable on
+        // mobile when an agent is streaming output.
         let touchStartY = null;
         let touchAccum = 0;
         const cellHeight = fontSize * 1.2;
+        // `userScrollAwayUntilTs` is a wall-clock deadline. While now < it,
+        // term.write is wrapped to preserve the user's viewport position.
+        // The deadline is pushed forward on every touchmove that scrolls up,
+        // and is cleared when the user scrolls back to the bottom.
+        let userScrollAwayUntilTs = 0;
+        const STICK_DECAY_MS = 5_000;
+        const isAtBottom = () => {
+          try {
+            const buf = term.buffer?.active;
+            if (!buf) return true;
+            // viewportY === baseY means scrollback is at the live cursor row.
+            return buf.viewportY >= buf.baseY;
+          } catch {
+            return true;
+          }
+        };
+        termRef.current = term;
         const onTouchStart = (e) => {
           if (e.touches.length !== 1) return;
           touchStartY = e.touches[0].clientY;
@@ -271,6 +294,14 @@ export default function Terminal({ onReady, onInput, onResize }) {
           if (steps === 0) return;
           try { term.scrollLines(steps); } catch {}
           touchAccum -= steps * cellHeight;
+          // After scrollLines, check whether the user is still scrolled up.
+          // If so, pin the "stick to position" window forward; if they're
+          // back at the bottom, drop the pin so auto-scroll resumes.
+          if (isAtBottom()) {
+            userScrollAwayUntilTs = 0;
+          } else {
+            userScrollAwayUntilTs = Date.now() + STICK_DECAY_MS;
+          }
         };
         const onTouchEnd = () => {
           touchStartY = null;
@@ -301,8 +332,37 @@ export default function Terminal({ onReady, onInput, onResize }) {
         };
         focusTerm();
 
+        // Wrapper around term.write that preserves the user's scrollback
+        // position when they've scrolled away from the bottom. ghostty's
+        // term.write moves the cursor and (for output that wraps the last
+        // row) emits scrolls that snap viewportY=baseY. By capturing
+        // viewportY pre-write and restoring it post-write while the
+        // "stick" deadline is active, the user's history view stays put
+        // through a stream of incoming chunks.
+        const writeKeepingPosition = (s) => {
+          if (Date.now() >= userScrollAwayUntilTs) {
+            // Either user is at bottom or the stick window has decayed —
+            // let normal auto-scroll happen.
+            term.write(s);
+            return;
+          }
+          let savedViewportY = null;
+          try {
+            savedViewportY = term.buffer?.active?.viewportY ?? null;
+          } catch {}
+          term.write(s);
+          if (savedViewportY != null) {
+            try {
+              const baseY = term.buffer?.active?.baseY ?? 0;
+              const target = Math.min(savedViewportY, baseY);
+              const delta = target - (term.buffer?.active?.viewportY ?? target);
+              if (delta !== 0) term.scrollLines(delta);
+            } catch {}
+          }
+        };
+
         onReady?.({
-          write: (s) => term.write(s),
+          write: writeKeepingPosition,
           focus: focusTerm,
           sendKey: (s) => onInputRef.current?.(s),
           fit: handleResize,
