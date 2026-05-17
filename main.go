@@ -65,7 +65,11 @@ func main() {
 			log.Printf("aurex: agents surface disabled (%s not found)", cfg.ClaudeAgentsDataRoot)
 		}
 	}
-	server := NewServer(cfg, store, push, ideas, agents, Frontend())
+	// Gas City reverse proxy. Probes both upstreams once at boot; if either
+	// is unreachable the corresponding mount stays disabled until restart.
+	gc := newGcProxy(cfg.GcDashboardURL, cfg.GcSupervisorURL)
+
+	server := NewServer(cfg, store, push, ideas, agents, gc, Frontend())
 	store.SetOnUpdate(server.BroadcastSessionUpdate)
 
 	stop := make(chan struct{})

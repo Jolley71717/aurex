@@ -104,6 +104,17 @@ type Config struct {
 	// running `claude agents` in the same user account as aurex.
 	ClaudeAgentsDataRoot string `json:"claudeAgentsDataRoot"`
 
+	// GcDashboardURL is the local Gas City dashboard origin (default
+	// http://localhost:8088). Empty disables the /gc proxy. Probed at startup
+	// — if unreachable the proxy stays off until aurex restarts.
+	GcDashboardURL string `json:"gcDashboardUrl"`
+
+	// GcSupervisorURL is the local Gas City supervisor API origin (default
+	// http://127.0.0.1:8372). Empty disables the /gc-api proxy. Probed at
+	// startup against /health; failure also disables /gc since the dashboard
+	// is useless without its API.
+	GcSupervisorURL string `json:"gcSupervisorUrl"`
+
 	path string
 }
 
@@ -151,6 +162,8 @@ func LoadConfig() (*Config, error) {
 		PasteMaxAgeHours:      24,
 		SessionSecretFile:     "aurex.session-secret",
 		ClaudeAgentsDataRoot:  defaultClaudeAgentsRoot(),
+		GcDashboardURL:        "http://localhost:8088",
+		GcSupervisorURL:       "http://127.0.0.1:8372",
 		path:                  path,
 	}
 
@@ -230,6 +243,18 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.SilenceSeconds <= 0 {
 		cfg.SilenceSeconds = 5
+		dirty = true
+	}
+	// Backfill the GC proxy URLs for existing configs. We never overwrite
+	// a non-empty value; only the truly-missing case gets a default. Set to
+	// "-" (or any other invalid URL) to disable while keeping the field
+	// present in the JSON.
+	if cfg.GcDashboardURL == "" {
+		cfg.GcDashboardURL = "http://localhost:8088"
+		dirty = true
+	}
+	if cfg.GcSupervisorURL == "" {
+		cfg.GcSupervisorURL = "http://127.0.0.1:8372"
 		dirty = true
 	}
 	// Backfill ClaudeAgentsDataRoot for existing configs. We never overwrite

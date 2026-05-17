@@ -30,17 +30,19 @@ type Server struct {
 	push     *PushManager
 	ideas    *IdeasManager
 	agents   *AgentsManager
+	gc       *gcProxy
 	frontend fs.FS // embedded React build (may be nil if not embedded yet)
 	upgrader websocket.Upgrader
 }
 
-func NewServer(cfg *Config, store *SessionStore, push *PushManager, ideas *IdeasManager, agents *AgentsManager, frontend fs.FS) *Server {
+func NewServer(cfg *Config, store *SessionStore, push *PushManager, ideas *IdeasManager, agents *AgentsManager, gc *gcProxy, frontend fs.FS) *Server {
 	s := &Server{
 		cfg:      cfg,
 		store:    store,
 		push:     push,
 		ideas:    ideas,
 		agents:   agents,
+		gc:       gc,
 		frontend: frontend,
 	}
 	s.upgrader = websocket.Upgrader{
@@ -109,6 +111,23 @@ func (s *Server) Routes() http.Handler {
 
 	// Hook endpoint is intentionally NOT behind auth — it gates on localhost instead.
 	r.Post("/api/hook/aura", hookAuraHandler(s.store, s.push))
+
+	// Gas City reverse proxy: /gc/* serves the dashboard SPA (with HTML
+	// rewritten to use /gc-api as the API base), /gc-api/* forwards to the
+	// supervisor. Both routes are gated by the aurex session middleware so
+	// the dashboard is only reachable to authenticated tailnet clients.
+	if s.gc != nil {
+		r.Route("/gc", func(r chi.Router) {
+			r.Use(s.authMiddleware)
+			r.HandleFunc("/", s.proxyGcDashboard)
+			r.HandleFunc("/*", s.proxyGcDashboard)
+		})
+		r.Route("/gc-api", func(r chi.Router) {
+			r.Use(s.authMiddleware)
+			r.HandleFunc("/", s.proxyGcSupervisor)
+			r.HandleFunc("/*", s.proxyGcSupervisor)
+		})
+	}
 
 	// Embedded frontend last so /api/* and /ws/* take precedence.
 	r.Handle("/*", s.frontendHandler())
