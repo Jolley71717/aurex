@@ -659,6 +659,7 @@ export default function IdeasPage({ onExit }) {
           { k: 'connections', l: 'Connections' },
           { k: 'personas', l: 'Personas' },
           { k: 'agents', l: 'Agents' },
+          { k: 'gascity', l: 'Gas City' },
         ].map((t) => (
           <button
             key={t.k}
@@ -737,6 +738,16 @@ export default function IdeasPage({ onExit }) {
         )}
         {tab === 'personas' && <PersonaPromptEditor />}
         {tab === 'agents' && <AgentsPanel />}
+        {tab === 'gascity' && (
+          <div className="h-full -mx-3 -my-3">
+            <iframe
+              src="/gc"
+              title="Gas City Dashboard"
+              className="h-full w-full border-0"
+              style={{ minHeight: 'calc(100vh - 160px)' }}
+            />
+          </div>
+        )}
       </main>
     </div>
   );
