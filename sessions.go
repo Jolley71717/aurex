@@ -139,7 +139,7 @@ func (s *SessionStore) Create(name string) (*Session, error) {
 		Name:       name,
 		TmuxName:   tmuxName,
 		CreatedAt:  time.Now().Unix(),
-		buffer:     NewOutputBuffer(256 << 20), // 256 MiB ring per session
+		buffer:     NewOutputBuffer(256 << 20), // 256 MiB ring per session — sized to hold a full Claude Code conversation (with TUI redraws) in /transcript history, plus the scroll-snap regression fix headroom
 		activeSubs: make(map[*Subscriber]bool),
 	}
 	if err := startSession(sess, s, s.push); err != nil {
@@ -178,6 +178,8 @@ func (s *SessionStore) AdoptExisting() error {
 		_ = exec.Command("tmux", "set-option", "-t", n, "mouse", "on").Run()
 		_ = exec.Command("tmux", "set-option", "-t", n, "status", "off").Run()
 		_ = exec.Command("tmux", "set-option", "-t", n, "allow-passthrough", "on").Run()
+		_ = exec.Command("tmux", "set-window-option", "-t", n, "alternate-screen", "off").Run()
+		_ = exec.Command("tmux", "set-option", "-t", n, "history-limit", "50000").Run()
 		TmuxConfigureSilenceHook(n, s.silenceSec, s.hookPort)
 		if err := startSession(sess, s, s.push); err != nil {
 			log.Printf("aurex: start adopted session %s: %v", n, err)
