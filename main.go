@@ -49,6 +49,15 @@ func main() {
 		ideas = NewIdeasManager(cfg.IdeasDataRoot, cfg.IdeasRepoRoot)
 		log.Printf("aurex: ideas surface enabled at %s (repo: %s)", cfg.IdeasDataRoot, cfg.IdeasRepoRoot)
 	}
+	var beads *BeadsManager
+	if cfg.BeadsRepoRoot != "" {
+		if info, err := os.Stat(cfg.BeadsRepoRoot); err == nil && info.IsDir() {
+			beads = NewBeadsManager(cfg.BeadsRepoRoot)
+			log.Printf("aurex: beads surface enabled (repo: %s)", cfg.BeadsRepoRoot)
+		} else {
+			log.Printf("aurex: beads surface disabled (%s not found)", cfg.BeadsRepoRoot)
+		}
+	}
 	// Agents surface — only enable if the configured Claude data root actually
 	// exists on disk at boot. Saves a "directory not found" error on every
 	// /api/agents poll for users who don't run `claude agents`.
@@ -69,7 +78,7 @@ func main() {
 	// is unreachable the corresponding mount stays disabled until restart.
 	gc := newGcProxy(cfg.GcDashboardURL, cfg.GcSupervisorURL)
 
-	server := NewServer(cfg, store, push, ideas, agents, gc, Frontend())
+	server := NewServer(cfg, store, push, ideas, beads, agents, gc, Frontend())
 	store.SetOnUpdate(server.BroadcastSessionUpdate)
 
 	stop := make(chan struct{})

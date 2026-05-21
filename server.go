@@ -29,18 +29,20 @@ type Server struct {
 	store    *SessionStore
 	push     *PushManager
 	ideas    *IdeasManager
+	beads    *BeadsManager
 	agents   *AgentsManager
 	gc       *gcProxy
 	frontend fs.FS // embedded React build (may be nil if not embedded yet)
 	upgrader websocket.Upgrader
 }
 
-func NewServer(cfg *Config, store *SessionStore, push *PushManager, ideas *IdeasManager, agents *AgentsManager, gc *gcProxy, frontend fs.FS) *Server {
+func NewServer(cfg *Config, store *SessionStore, push *PushManager, ideas *IdeasManager, beads *BeadsManager, agents *AgentsManager, gc *gcProxy, frontend fs.FS) *Server {
 	s := &Server{
 		cfg:      cfg,
 		store:    store,
 		push:     push,
 		ideas:    ideas,
+		beads:    beads,
 		agents:   agents,
 		gc:       gc,
 		frontend: frontend,
@@ -103,6 +105,9 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/paste/image", s.pasteHandler)
 		if s.ideas != nil {
 			s.ideas.RegisterRoutes(r)
+		}
+		if s.beads != nil {
+			s.beads.RegisterRoutes(r)
 		}
 		if s.agents != nil {
 			s.agents.RegisterRoutes(r)

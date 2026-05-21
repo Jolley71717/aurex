@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar.jsx';
 import Terminal from './components/Terminal.jsx';
 import Toolbar, { ctrlOf } from './components/Toolbar.jsx';
@@ -6,6 +6,10 @@ import PushPanel from './components/PushPanel.jsx';
 import IdeasPage from './components/IdeasPage.jsx';
 import { useSession } from './hooks/useSession.js';
 import { usePush } from './hooks/usePush.js';
+
+// BeadsPage pulls in the bead list + SSE machinery; terminal-only users
+// shouldn't pay the parse/eval cost. Lazy keeps it out of the initial bundle.
+const BeadsPage = lazy(() => import('./components/BeadsPage.jsx'));
 
 function getInitialSessionId() {
   const params = new URLSearchParams(window.location.search);
@@ -53,10 +57,13 @@ function useKeyboardInset() {
 // to update the bar without a full reload — keeps the WS + push state intact
 // when the user toggles between surfaces.
 function useSurface() {
-  const compute = () =>
-    typeof window !== 'undefined' && window.location.pathname.startsWith('/ideas')
-      ? 'ideas'
-      : 'terminal';
+  const compute = () => {
+    if (typeof window === 'undefined') return 'terminal';
+    const path = window.location.pathname;
+    if (path.startsWith('/ideas')) return 'ideas';
+    if (path.startsWith('/beads')) return 'beads';
+    return 'terminal';
+  };
   const [surface, setSurface] = useState(compute);
   useEffect(() => {
     const onPop = () => setSurface(compute());
@@ -64,7 +71,7 @@ function useSurface() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
   const navigate = useCallback((next) => {
-    const target = next === 'ideas' ? '/ideas' : '/';
+    const target = next === 'ideas' ? '/ideas' : next === 'beads' ? '/beads' : '/';
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target + window.location.search);
     }
@@ -217,6 +224,20 @@ export default function App() {
     return <IdeasPage onExit={() => navigate('terminal')} />;
   }
 
+  if (surface === 'beads') {
+    return (
+      <Suspense
+        fallback={
+          <div className="flex h-full w-full items-center justify-center bg-bg text-sm text-zinc-500">
+            loading beads…
+          </div>
+        }
+      >
+        <BeadsPage onExit={() => navigate('terminal')} />
+      </Suspense>
+    );
+  }
+
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-zinc-100">
       <Sidebar
@@ -231,6 +252,7 @@ export default function App() {
         connected={connected}
         onOpenPush={() => setPushPanelOpen(true)}
         onOpenIdeas={() => navigate('ideas')}
+        onOpenBeads={() => navigate('beads')}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
@@ -261,6 +283,15 @@ export default function App() {
               title="Ideas inbox"
             >
               ideas
+            </button>
+            <button
+              onClick={() => navigate('beads')}
+              onMouseDown={(e) => e.preventDefault()}
+              onTouchStart={(e) => e.preventDefault()}
+              className="rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              title="Beads board"
+            >
+              beads
             </button>
             <button
               onClick={() => setPushPanelOpen(true)}

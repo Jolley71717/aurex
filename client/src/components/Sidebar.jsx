@@ -109,6 +109,7 @@ export default function Sidebar({
   connected,
   onOpenPush,
   onOpenIdeas,
+  onOpenBeads,
   open,
   onClose,
 }) {
@@ -212,6 +213,16 @@ export default function Sidebar({
             className="mt-3 rounded-md border border-line bg-bg px-3 py-2 text-left text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
           >
             💡 Ideas inbox
+          </button>
+        )}
+        {onOpenBeads && (
+          <button
+            onClick={onOpenBeads}
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => e.preventDefault()}
+            className="rounded-md border border-line bg-bg px-3 py-2 text-left text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
+          >
+            📿 Beads board
           </button>
         )}
         <div className="flex items-center gap-2 border-t border-line pt-3">

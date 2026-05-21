@@ -93,6 +93,10 @@ type Config struct {
 	IdeasDataRoot string `json:"ideasDataRoot"`
 	IdeasRepoRoot string `json:"ideasRepoRoot"`
 
+	// BeadsRepoRoot is the working directory for all `bd` invocations.
+	// Defaults to ~/git/k3s-pi. Empty disables the /api/beads surface.
+	BeadsRepoRoot string `json:"beadsRepoRoot"`
+
 	// ClaudeAgentsDataRoot is the directory holding Claude Code's local
 	// agent state — typically $HOME/.claude. The /api/agents surface reads
 	// roster.json + per-agent state.json from inside this tree. Set to
@@ -129,6 +133,14 @@ func defaultConfigPath() string {
 // or "" if it can't be resolved. The /api/agents surface activates only
 // when this is non-empty AND the path exists at boot — keeps the surface
 // silent on machines that don't run `claude agents`.
+func defaultBeadsRepoRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, "git", "k3s-pi")
+}
+
 func defaultClaudeAgentsRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -145,6 +157,7 @@ func LoadConfig() (*Config, error) {
 	path := defaultConfigPath()
 	cfg := &Config{
 		Port:                  7681,
+		BeadsRepoRoot:         defaultBeadsRepoRoot(),
 		Auth:                  true,
 		Username:              "aurex",
 		Password:              "", // populated from AUREX_PASSWORD env at boot
@@ -266,6 +279,10 @@ func LoadConfig() (*Config, error) {
 			cfg.ClaudeAgentsDataRoot = def
 			dirty = true
 		}
+	}
+	if cfg.BeadsRepoRoot == "" {
+		cfg.BeadsRepoRoot = defaultBeadsRepoRoot()
+		dirty = true
 	}
 	if dirty {
 		if err := cfg.Save(); err != nil {
