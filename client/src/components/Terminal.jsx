@@ -73,6 +73,17 @@ export default function Terminal({ onReady, onInput, onResize }) {
   const mirrorRef = useRef(null);
   const lastSentRef = useRef('');
   const [isTouch, setIsTouch] = useState(false);
+  // Soft-keyboard "armed" flag. When false, the mirror renders with
+  // inputMode="none" and readOnly, so iOS / Android refuse to show the soft
+  // keyboard even if focus is restored to the mirror by an OS-level auto-
+  // focus heuristic (e.g. focus restoration on touchstart during a scroll
+  // gesture). The toggle button on the toolbar drives this state by calling
+  // the imperative focus()/blur() methods on the handle.
+  const [keyboardArmed, setKeyboardArmed] = useState(false);
+  // Ref mirror so isKeyboardOpen() can return synchronously without React
+  // having to re-render first.
+  const keyboardArmedRef = useRef(false);
+  useEffect(() => { keyboardArmedRef.current = keyboardArmed; }, [keyboardArmed]);
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const touch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
@@ -423,48 +434,51 @@ export default function Terminal({ onReady, onInput, onResize }) {
         // browser requires the focus to land on a real input element from a
         // user gesture — direct .focus() on the textarea reliably triggers it.
         const focusTerm = () => {
-          // On touch devices, focus our mobile input mirror — that's where all
-          // typing should land. On desktop, fall through to ghostty's native
-          // focus (its keydown handler is what processes typing there).
-          if (mirrorRef.current) {
-            try { mirrorRef.current.focus({ preventScroll: true }); return; } catch {}
-            mirrorRef.current.focus();
+          // Desktop: focus ghostty's textarea (or fall through to term.focus)
+          // — there's no soft keyboard to gate, and ghostty's keydown handler
+          // is what processes typing.
+          if (!mirrorRef.current) {
+            const ta = term.textarea;
+            if (ta && typeof ta.focus === 'function') ta.focus();
+            else term.focus();
             return;
           }
-          const ta = term.textarea;
-          if (ta && typeof ta.focus === 'function') {
-            ta.focus();
-          } else {
-            term.focus();
-          }
+          // Touch path: "arm" the keyboard (flips inputMode → "text" and
+          // clears readOnly), THEN focus on the next frame after React has
+          // re-rendered. Doing it synchronously would call .focus() on a
+          // mirror that's still readOnly + inputMode=none, and iOS would
+          // refuse to show the soft keyboard.
+          keyboardArmedRef.current = true;
+          setKeyboardArmed(true);
+          requestAnimationFrame(() => {
+            try { mirrorRef.current?.focus({ preventScroll: true }); } catch {
+              try { mirrorRef.current?.focus(); } catch {}
+            }
+          });
         };
         const blurTerm = () => {
-          // Blur every input the soft keyboard might be anchored to. iOS
-          // sometimes refocuses ghostty's own contenteditable host (or its
-          // hidden textarea) on a synthetic tap even when we preventDefault
-          // on touchstart — blurring just the mirror leaves a back door
-          // through which the keyboard can pop back open.
+          // Disarm first so even if iOS re-focuses the mirror after our
+          // blur() (e.g. on the next touchstart), inputMode=none keeps the
+          // soft keyboard down. Then blur every node iOS might be holding
+          // focus on — the mirror, ghostty's own textarea, and the host
+          // element ghostty makes contenteditable.
+          keyboardArmedRef.current = false;
+          setKeyboardArmed(false);
           try { mirrorRef.current?.blur(); } catch {}
           const ta = term.textarea;
           try { if (ta && typeof ta.blur === 'function') ta.blur(); } catch {}
           try {
-            // Some ghostty builds put tabindex=0 on the host div itself.
             const host = containerRef.current;
             if (host && typeof host.blur === 'function') host.blur();
           } catch {}
         };
         const isKeyboardOpen = () => {
-          // True when anything inside the terminal panel is focused on touch.
-          // We can't gate on the mirror alone — iOS may reroute focus to
-          // ghostty's contenteditable host or its hidden textarea, both of
-          // which also bring the soft keyboard up.
-          if (!mirrorRef.current) return false;
-          const ae = document.activeElement;
-          if (!ae) return false;
-          if (ae === mirrorRef.current) return true;
-          const host = containerRef.current;
-          if (!host) return false;
-          return host === ae || host.contains(ae);
+          // Track our explicit "armed" flag rather than document.activeElement
+          // — iOS will sometimes restore focus to the mirror on its own
+          // (during a scroll, for instance), and we don't want that to count
+          // as "keyboard open" because inputMode=none keeps the keyboard
+          // hidden in that case.
+          return keyboardArmedRef.current;
         };
         // Initial focus: desktop wants the terminal hot for typing immediately,
         // but on touch the soft keyboard should NOT pop up just because the
@@ -549,6 +563,13 @@ export default function Terminal({ onReady, onInput, onResize }) {
           autoCorrect="on"
           spellCheck={true}
           aria-label="Terminal input"
+          // inputMode + readOnly are the levers that keep the soft keyboard
+          // down when the user hasn't tapped the ⌨️ toggle. Both iOS and
+          // Android refuse to render the soft keyboard for an input with
+          // inputmode="none"; readOnly is the belt-and-suspenders fallback
+          // for browsers that don't honor inputmode on a textarea.
+          inputMode={keyboardArmed ? 'text' : 'none'}
+          readOnly={!keyboardArmed}
           className="absolute inset-0 z-10 resize-none border-0 bg-transparent p-0 outline-none"
           style={{
             color: 'transparent',
