@@ -427,15 +427,205 @@ func (m *IdeasManager) handleAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, target)
 }
 
-// regenerateIdea shells out to `claude --print` with the persona's section
-// from PERSONA-PROMPTS.md as the system prompt and the original idea + the
-// user's revision note as input. Returns the parsed fileIdea ready to append
-// to the day's JSONL.
+// runLLM dispatches to the configured LLM. It returns the stripped string
+// content (markdown fences removed) ready for JSON parsing by the caller.
 //
-// The claude binary path is configurable via $AUREX_CLAUDE_BIN; defaults to
-// "claude" on PATH. Model defaults to claude-opus-4-7 — same Opus 4.7 the
-// project's senior agents use — but is overridable via $AUREX_REGEN_MODEL.
-// 5-minute hard timeout so a stuck regen can't hang the HTTP handler.
+// Strategy:
+//   1. Try claude --print. Fast, persona-tuned, what we'd prefer.
+//   2. On any claude failure (auth, exit nonzero, timeout), fall back to a
+//      POST against local Ollama qwen2.5:14b. Free, no auth, ~3-15 s per
+//      response, runs on Mac Mini 2.
+//   3. Aggregate errors so the operator sees both failure causes if both
+//      paths fail.
+//
+// Env knobs:
+//   AUREX_LLM=claude|ollama|claude-then-ollama  default = claude-then-ollama
+//   AUREX_CLAUDE_BIN  path to claude (auto-resolved by default)
+//   AUREX_REGEN_MODEL claude model (default claude-opus-4-7)
+//   AUREX_OLLAMA_URL  Ollama endpoint (default http://192.168.0.40:11434)
+//   AUREX_OLLAMA_MODEL Ollama model (default qwen2.5:14b-instruct-q4_K_M)
+func runLLM(workDir, systemPrompt, userPrompt string) (string, error) {
+	mode := strings.TrimSpace(os.Getenv("AUREX_LLM"))
+	if mode == "" {
+		mode = "claude-then-ollama"
+	}
+	var claudeErr, ollamaErr error
+	if mode == "claude" || mode == "claude-then-ollama" {
+		out, err := runClaudePrint(workDir, systemPrompt, userPrompt)
+		if err == nil {
+			return stripFences(out), nil
+		}
+		claudeErr = err
+		if mode == "claude" {
+			return "", fmt.Errorf("claude regen failed: %w", err)
+		}
+	}
+	if mode == "ollama" || mode == "claude-then-ollama" {
+		out, err := runOllamaGenerate(systemPrompt, userPrompt)
+		if err == nil {
+			return stripFences(out), nil
+		}
+		ollamaErr = err
+	}
+	if claudeErr != nil && ollamaErr != nil {
+		return "", fmt.Errorf("both LLM paths failed; claude: %v; ollama: %v", claudeErr, ollamaErr)
+	}
+	if ollamaErr != nil {
+		return "", fmt.Errorf("ollama regen failed: %w", ollamaErr)
+	}
+	return "", fmt.Errorf("LLM mode %q produced no output", mode)
+}
+
+func stripFences(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	return strings.TrimSpace(s)
+}
+
+// runClaudePrint shells `claude --print ...` and returns stdout.
+func runClaudePrint(workDir, systemPrompt, userPrompt string) (string, error) {
+	claudeBin, err := resolveClaudeBin()
+	if err != nil {
+		return "", err
+	}
+	model := paperclipEnv("AUREX_REGEN_MODEL", "claude-opus-4-7")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, claudeBin,
+		"--print",
+		"--model", model,
+		"--append-system-prompt", systemPrompt,
+		userPrompt,
+	)
+	cmd.Dir = workDir
+	// Close stdin explicitly so claude doesn't sit for 3s on the "no stdin
+	// data" wait under launchd (where there's no controlling TTY).
+	cmd.Stdin = strings.NewReader("")
+	out, runErr := cmd.Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("claude timed out after 5 min: %w", ctx.Err())
+	}
+	if runErr != nil {
+		stderr := ""
+		stdoutStr := strings.TrimSpace(string(out))
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		hint := ""
+		if strings.Contains(stderr, "Not logged in") || strings.Contains(stdoutStr, "Not logged in") {
+			hint = " (claude keychain auth not accessible under launchd — set ANTHROPIC_API_KEY in the LaunchAgent env, or rely on the ollama fallback)"
+		}
+		return "", fmt.Errorf("claude exited %v (stderr=%q, stdout=%q)%s", runErr, stderr, stdoutStr, hint)
+	}
+	return string(out), nil
+}
+
+// runOllamaGenerate POSTs against Ollama's /api/generate endpoint.
+func runOllamaGenerate(systemPrompt, userPrompt string) (string, error) {
+	baseURL := paperclipEnv("AUREX_OLLAMA_URL", "http://192.168.0.40:11434")
+	model := paperclipEnv("AUREX_OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_K_M")
+	payload, _ := json.Marshal(map[string]any{
+		"model":  model,
+		"system": systemPrompt,
+		"prompt": userPrompt,
+		"stream": false,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		strings.TrimRight(baseURL, "/")+"/api/generate",
+		strings.NewReader(string(payload)),
+	)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama POST failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		preview := string(body)
+		if len(preview) > 300 {
+			preview = preview[:300] + "..."
+		}
+		return "", fmt.Errorf("ollama returned HTTP %d: %s", resp.StatusCode, preview)
+	}
+	var parsed struct {
+		Response string `json:"response"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("parse ollama response: %w", err)
+	}
+	return parsed.Response, nil
+}
+
+// resolveClaudeBin finds an executable `claude` binary. Order matters:
+//   1. $AUREX_CLAUDE_BIN if set and the file exists.
+//   2. Well-known install paths for the REAL Anthropic claude binary. These
+//      are checked BEFORE PATH lookup because the cmux app bundle ships a
+//      17-byte shim at /Applications/cmux.app/Contents/Resources/bin/claude
+//      that takes priority in the LaunchAgent's PATH but exits 127 ("claude
+//      not found in PATH") when invoked under launchd. The shim is intended
+//      to forward to a real claude on the user's PATH — but launchd's PATH
+//      doesn't include $HOME/.local/bin where the real one lives, so the
+//      shim's forward fails. Picking the real binary directly sidesteps the
+//      shim entirely.
+//   3. exec.LookPath("claude") — fallback for nonstandard installs.
+//
+// Returns the absolute path or a descriptive error.
+func resolveClaudeBin() (string, error) {
+	if env := strings.TrimSpace(os.Getenv("AUREX_CLAUDE_BIN")); env != "" {
+		if _, err := os.Stat(env); err == nil {
+			return env, nil
+		}
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local/bin/claude"),
+		"/opt/homebrew/bin/claude",
+		"/usr/local/bin/claude",
+	}
+	for _, p := range candidates {
+		fi, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		// Reject pathological zero-size or sub-1KB "shim" files — the real
+		// claude is multi-MB.
+		if fi.Size() < 1024 {
+			continue
+		}
+		return p, nil
+	}
+	if p, err := exec.LookPath("claude"); err == nil {
+		if fi, statErr := os.Stat(p); statErr == nil && fi.Size() >= 1024 {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("real claude binary not found — set AUREX_CLAUDE_BIN or install at one of: %s", strings.Join(candidates, ", "))
+}
+
+// regenerateIdea produces an updated fileIdea body via the persona's prompt.
+// Primary path: shell `claude --print`. Fallback: POST to local Ollama. The
+// claude path is preferred because the persona prompts are tuned to Claude's
+// voice, but under launchd it fails on keychain auth (the OAuth credentials
+// live in a keychain item only the user's interactive session can read). The
+// Ollama fallback uses qwen2.5:14b on Mac Mini 2, which is what the project
+// uses for i18n / AI services and produces good enough output for revisions.
+//
+// Auth-fix-it knob for the user: set ANTHROPIC_API_KEY in the LaunchAgent
+// env (or write it to /Users/lukedutton/aurex/.anthropic-key and have
+// launch-helper.sh export it) — claude will then use the API key instead of
+// the OAuth keychain and the primary path works under launchd too.
+//
+// $AUREX_CLAUDE_BIN overrides the claude binary path. $AUREX_REGEN_MODEL
+// overrides the claude model (default claude-opus-4-7). $AUREX_OLLAMA_URL
+// and $AUREX_OLLAMA_MODEL override the fallback.
 func (m *IdeasManager) regenerateIdea(orig *Idea, note string, newRevision int) (fileIdea, error) {
 	var zero fileIdea
 	promptsPath := m.personaPromptsPath()
@@ -482,38 +672,11 @@ REVIEWER NOTE (this is the revision ask):
 %s
 `, string(origJSON), strings.TrimSpace(note))
 
-	claudeBin := os.Getenv("AUREX_CLAUDE_BIN")
-	if claudeBin == "" {
-		claudeBin = "claude"
-	}
-	model := os.Getenv("AUREX_REGEN_MODEL")
-	if model == "" {
-		model = "claude-opus-4-7"
+	resp, llmErr := runLLM(m.RepoRoot, systemPrompt, userPrompt)
+	if llmErr != nil {
+		return zero, llmErr
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, claudeBin,
-		"--print",
-		"--model", model,
-		"--append-system-prompt", systemPrompt,
-		userPrompt,
-	)
-	cmd.Dir = m.RepoRoot
-	out, runErr := cmd.Output()
-	if ctx.Err() != nil {
-		return zero, fmt.Errorf("claude regen timed out after 5 min: %w", ctx.Err())
-	}
-	if runErr != nil {
-		stderr := ""
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(exitErr.Stderr))
-		}
-		return zero, fmt.Errorf("claude exited non-zero: %w (stderr: %s)", runErr, stderr)
-	}
-
-	// Strip ```json fences if the model wraps despite instructions.
-	resp := strings.TrimSpace(string(out))
 	resp = strings.TrimPrefix(resp, "```json")
 	resp = strings.TrimPrefix(resp, "```")
 	resp = strings.TrimSuffix(resp, "```")
@@ -821,33 +984,12 @@ SHARED CONTEXT:
 %s
 `, count, today, persona, persona, today, contextBlock)
 
-	claudeBin := paperclipEnv("AUREX_CLAUDE_BIN", "claude")
-	model := paperclipEnv("AUREX_GENERATE_MODEL", "claude-opus-4-7")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, claudeBin,
-		"--print",
-		"--model", model,
-		"--append-system-prompt", systemPrompt,
-		userPrompt,
-	)
-	cmd.Dir = m.RepoRoot
-	out, runErr := cmd.Output()
-	if ctx.Err() != nil {
-		http.Error(w, "claude generate timed out after 6 min", http.StatusGatewayTimeout)
+	respStr, llmErr := runLLM(m.RepoRoot, systemPrompt, userPrompt)
+	if llmErr != nil {
+		http.Error(w, llmErr.Error(), http.StatusBadGateway)
 		return
 	}
-	if runErr != nil {
-		stderr := ""
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(exitErr.Stderr))
-		}
-		http.Error(w, fmt.Sprintf("claude exited non-zero: %v (stderr: %s)", runErr, stderr), http.StatusBadGateway)
-		return
-	}
-
-	resp := strings.TrimSpace(string(out))
+	resp := strings.TrimSpace(respStr)
 	resp = strings.TrimPrefix(resp, "```json")
 	resp = strings.TrimPrefix(resp, "```")
 	resp = strings.TrimSuffix(resp, "```")
