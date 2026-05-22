@@ -616,6 +616,32 @@ export default function IdeasPage({ onExit }) {
     [load]
   );
 
+  // Spawn a one-shot persona run to drop 3 new ideas into the inbox. Backed
+  // by POST /api/ideas/generate — typical latency is 15-40s on Opus 4.7, so
+  // we set busy and refresh on completion.
+  const handleGenerate = useCallback(
+    async (persona) => {
+      if (!confirm(`Generate 3 new ${persona} ideas? This shells out to claude (~30s, ~$0.30-1.00).`)) return;
+      setBusy(true);
+      try {
+        const res = await fetch('/api/ideas/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ persona, count: 3 }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          alert(`Generate failed: ${text}`);
+          return;
+        }
+        await load();
+      } finally {
+        setBusy(false);
+      }
+    },
+    [load]
+  );
+
   const pendingCount = (counts['pending-review'] || 0) + (counts['needs-revision'] || 0);
 
   const filteredIdeas = useMemo(() => {
@@ -642,6 +668,30 @@ export default function IdeasPage({ onExit }) {
             {pendingCount} pending
           </span>
         )}
+        <details className="relative">
+          <summary
+            className="list-none cursor-pointer rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 marker:hidden"
+            title="Generate new ideas from a persona"
+          >
+            + Generate
+          </summary>
+          <div className="absolute right-0 z-10 mt-1 w-44 rounded-md border border-line bg-panel shadow-lg">
+            {['CEO', 'CFO', 'CMO', 'CTO', 'CPO'].map((p) => (
+              <button
+                key={p}
+                type="button"
+                disabled={busy}
+                onClick={(e) => {
+                  e.currentTarget.closest('details')?.removeAttribute('open');
+                  handleGenerate(p);
+                }}
+                className="block w-full px-3 py-1.5 text-left text-[12px] text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+              >
+                3 new from {p}
+              </button>
+            ))}
+          </div>
+        </details>
         <button
           type="button"
           onClick={load}
