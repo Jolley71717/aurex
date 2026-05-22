@@ -397,18 +397,15 @@ export default function Terminal({ onReady, onInput, onResize }) {
           if (atBottom !== followRef.current) setFollow(atBottom);
         };
         const onTouchEnd = () => {
-          // Tap (small total movement) → focus the mobile input mirror so the
-          // soft keyboard opens. Drags (scrolling) leave focus alone.
-          const wasTap = touchMovedTotal < 8;
+          // Tap and drag end the same way: just reset accumulators. The soft
+          // keyboard is opened/closed explicitly via the toolbar's keyboard
+          // toggle button — tapping the terminal area is never a reason to
+          // pop the keyboard up. Users found the auto-focus disruptive when
+          // they were just reading scrollback or following an agent's stream.
           touchStartY = null;
           touchStartX = null;
           touchAccum = 0;
           touchMovedTotal = 0;
-          if (wasTap && mirrorRef.current) {
-            try { mirrorRef.current.focus({ preventScroll: true }); } catch {
-              mirrorRef.current.focus();
-            }
-          }
         };
         containerRef.current.addEventListener('touchstart', onTouchStart, { passive: true });
         containerRef.current.addEventListener('touchmove', onTouchMove, { passive: true });
@@ -441,7 +438,41 @@ export default function Terminal({ onReady, onInput, onResize }) {
             term.focus();
           }
         };
-        focusTerm();
+        const blurTerm = () => {
+          // Blur every input the soft keyboard might be anchored to. iOS
+          // sometimes refocuses ghostty's own contenteditable host (or its
+          // hidden textarea) on a synthetic tap even when we preventDefault
+          // on touchstart — blurring just the mirror leaves a back door
+          // through which the keyboard can pop back open.
+          try { mirrorRef.current?.blur(); } catch {}
+          const ta = term.textarea;
+          try { if (ta && typeof ta.blur === 'function') ta.blur(); } catch {}
+          try {
+            // Some ghostty builds put tabindex=0 on the host div itself.
+            const host = containerRef.current;
+            if (host && typeof host.blur === 'function') host.blur();
+          } catch {}
+        };
+        const isKeyboardOpen = () => {
+          // True when anything inside the terminal panel is focused on touch.
+          // We can't gate on the mirror alone — iOS may reroute focus to
+          // ghostty's contenteditable host or its hidden textarea, both of
+          // which also bring the soft keyboard up.
+          if (!mirrorRef.current) return false;
+          const ae = document.activeElement;
+          if (!ae) return false;
+          if (ae === mirrorRef.current) return true;
+          const host = containerRef.current;
+          if (!host) return false;
+          return host === ae || host.contains(ae);
+        };
+        // Initial focus: desktop wants the terminal hot for typing immediately,
+        // but on touch the soft keyboard should NOT pop up just because the
+        // session loaded — wait for the user to explicitly tap the toolbar
+        // keyboard button.
+        if (!mirrorRef.current) {
+          focusTerm();
+        }
 
         const jumpToBottom = () => {
           try { term.scrollToBottom(); } catch {}
@@ -451,6 +482,8 @@ export default function Terminal({ onReady, onInput, onResize }) {
         onReady?.({
           write: writeAndPreserveScroll,
           focus: focusTerm,
+          blur: blurTerm,
+          isKeyboardOpen,
           sendKey: (s) => onInputRef.current?.(s),
           fit: handleResize,
           refit: refitNow,

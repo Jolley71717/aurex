@@ -182,11 +182,36 @@ export default function App() {
 
   const handleToolbarKey = useCallback(
     (seq) => {
+      const wasOpen = termHandleRef.current?.isKeyboardOpen?.();
       sendInput(seq);
-      termHandleRef.current?.focus();
+      if (wasOpen) {
+        // Keyboard was up before the tap — keep it up. (preventDefault on
+        // the button's touchstart already prevents the focus shifting away,
+        // but a refocus is the belt to that suspender.)
+        termHandleRef.current?.focus();
+      } else {
+        // Keyboard was down — make sure iOS doesn't silently reopen it by
+        // restoring focus to ghostty's textarea on the synthetic tap. The
+        // microtask hop is required because iOS's automatic restore runs
+        // AFTER the click handler returns; blurring synchronously here
+        // would race with it and lose.
+        setTimeout(() => {
+          termHandleRef.current?.blur?.();
+        }, 0);
+      }
     },
     [sendInput]
   );
+
+  const handleToggleKeyboard = useCallback(() => {
+    const handle = termHandleRef.current;
+    if (!handle) return;
+    if (handle.isKeyboardOpen?.()) {
+      handle.blur?.();
+    } else {
+      handle.focus?.();
+    }
+  }, []);
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-zinc-100">
@@ -273,6 +298,7 @@ export default function App() {
                 onSendKey={handleToolbarKey}
                 ctrlArmed={ctrlArmed}
                 onCtrlArm={() => setCtrlArmed((v) => !v)}
+                onToggleKeyboard={handleToggleKeyboard}
               />
             </div>
           </>
