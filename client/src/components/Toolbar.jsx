@@ -28,8 +28,12 @@ function ctrlOf(ch) {
  * `desktop` mode renders only the PASTE button (desktop keyboards have
  * ESC/TAB/arrows/CTRL natively, but Cmd+V can't transport clipboard images
  * so PASTE is still useful for screenshots).
+ *
+ * The rightmost button on mobile is a keyboard toggle (⌨️) that explicitly
+ * opens or dismisses the soft keyboard. Tapping the terminal area no longer
+ * auto-focuses the mirror, so the toggle is the user's only path to typing.
  */
-export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed, desktop = false }) {
+export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed, onToggleKeyboard, desktop = false }) {
   const [pressed, setPressed] = useState(null);
   // pasteStatus: null | 'ok' | 'empty' | 'denied' | 'unsupported'
   // Drives the brief flash colour on the Paste button so the user gets
@@ -41,6 +45,14 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed, desktop = fal
     setPressed(k.label);
     setTimeout(() => setPressed(null), 80);
     onSendKey(k.seq);
+  };
+
+  const handleKeyboardToggle = () => {
+    // Briefly flash the button so the user knows the tap registered, even
+    // when the keyboard takes a moment to animate in/out.
+    setPressed('KBD');
+    setTimeout(() => setPressed(null), 80);
+    onToggleKeyboard?.();
   };
 
   const noFocusSteal = (e) => e.preventDefault();
@@ -202,6 +214,24 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed, desktop = fal
           {k.label}
         </button>
       ))}
+      {onToggleKeyboard && (
+        <button
+          tabIndex={-1}
+          onMouseDown={noFocusSteal}
+          onTouchStart={noFocusSteal}
+          onClick={handleKeyboardToggle}
+          aria-label="Show or hide keyboard"
+          title="Show / hide keyboard"
+          className={[
+            'shrink-0 rounded-md border px-3 py-2 text-xs font-mono',
+            pressed === 'KBD'
+              ? 'border-aura bg-aura/15 text-aura'
+              : 'border-line bg-bg text-zinc-200 active:bg-zinc-800',
+          ].join(' ')}
+        >
+          ⌨️
+        </button>
+      )}
     </div>
   );
 }
