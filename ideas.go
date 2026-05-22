@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,6 +75,13 @@ type reviewStateEntry struct {
 // fileIdea is what we serialize on disk in the per-day JSONL. State lives in
 // the sidecar, not here, so re-running the generator can never overwrite
 // review decisions.
+//
+// Revision is bumped by the needs-revision regen path: when the user sends an
+// idea back for revision, we shell claude with the persona prompt + the user
+// note and APPEND a new line to the same JSONL with Revision+1. loadAll
+// dedupes by ID and picks the highest revision, so the rendered idea always
+// reflects the latest regenerated body. Revision 0 (the original generator
+// output) doesn't write the field; it's the implicit default.
 type fileIdea struct {
 	ID           string   `json:"id"`
 	Persona      string   `json:"persona"`
@@ -85,6 +93,7 @@ type fileIdea struct {
 	RiskIfWeDont string   `json:"risk_if_we_dont"`
 	FirstStep    string   `json:"first_step"`
 	Synthesis    string   `json:"synthesis"`
+	Revision     int      `json:"revision,omitempty"`
 }
 
 func NewIdeasManager(dataRoot, repoRoot string) *IdeasManager {
@@ -119,7 +128,18 @@ func (m *IdeasManager) loadAll() ([]Idea, error) {
 	state, _ := m.loadState()
 	declinedIDs := m.loadDeclinedIDs()
 
-	var out []Idea
+	// First pass: read every line into a map keyed by idea ID, keeping the
+	// highest-Revision entry per ID. This handles the needs-revision regen
+	// path that appends new lines for the same ID with Revision+1, while
+	// preserving the original generator output (Revision 0) for never-revised
+	// ideas.
+	type fileWithCtx struct {
+		fi      fileIdea
+		date    string
+		persona string
+	}
+	byID := map[string]fileWithCtx{}
+
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
@@ -151,37 +171,49 @@ func (m *IdeasManager) loadAll() ([]Idea, error) {
 			if err := json.Unmarshal([]byte(line), &fi); err != nil {
 				continue
 			}
-			if fi.Persona == "" {
-				fi.Persona = persona
+			if fi.ID == "" {
+				continue
 			}
-			if fi.Date == "" {
-				fi.Date = date
+			if existing, ok := byID[fi.ID]; ok && existing.fi.Revision >= fi.Revision {
+				continue
 			}
-			idea := Idea{
-				ID:           fi.ID,
-				Persona:      fi.Persona,
-				Date:         fi.Date,
-				Title:        fi.Title,
-				Body:         fi.Body,
-				References:   fi.References,
-				Effort:       fi.Effort,
-				RiskIfWeDont: fi.RiskIfWeDont,
-				FirstStep:    fi.FirstStep,
-				Synthesis:    fi.Synthesis,
-				State:        "pending-review",
-			}
-			if s, ok := state[idea.ID]; ok {
-				idea.State = s.State
-				idea.Note = s.Note
-				idea.RevisionCount = s.RevisionCount
-				idea.AcceptedBeadID = s.AcceptedBeadID
-				idea.LastTouchedTs = s.LastTouchedTs
-			} else if _, declined := declinedIDs[idea.ID]; declined {
-				idea.State = "declined"
-			}
-			out = append(out, idea)
+			byID[fi.ID] = fileWithCtx{fi: fi, date: date, persona: persona}
 		}
 		_ = f.Close()
+	}
+
+	var out []Idea
+	for _, fwc := range byID {
+		fi := fwc.fi
+		if fi.Persona == "" {
+			fi.Persona = fwc.persona
+		}
+		if fi.Date == "" {
+			fi.Date = fwc.date
+		}
+		idea := Idea{
+			ID:           fi.ID,
+			Persona:      fi.Persona,
+			Date:         fi.Date,
+			Title:        fi.Title,
+			Body:         fi.Body,
+			References:   fi.References,
+			Effort:       fi.Effort,
+			RiskIfWeDont: fi.RiskIfWeDont,
+			FirstStep:    fi.FirstStep,
+			Synthesis:    fi.Synthesis,
+			State:        "pending-review",
+		}
+		if s, ok := state[idea.ID]; ok {
+			idea.State = s.State
+			idea.Note = s.Note
+			idea.RevisionCount = s.RevisionCount
+			idea.AcceptedBeadID = s.AcceptedBeadID
+			idea.LastTouchedTs = s.LastTouchedTs
+		} else if _, declined := declinedIDs[idea.ID]; declined {
+			idea.State = "declined"
+		}
+		out = append(out, idea)
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
@@ -326,6 +358,31 @@ func (m *IdeasManager) handleAction(w http.ResponseWriter, r *http.Request) {
 		entry.State = "needs-revision"
 		entry.Note = req.Note
 		entry.RevisionCount = entry.RevisionCount + 1
+		// Regenerate the idea body via the same persona that produced it,
+		// running through `claude --print` with the persona section from
+		// PERSONA-PROMPTS.md. On success we append a new fileIdea to the
+		// JSONL with Revision=entry.RevisionCount; loadAll picks the highest
+		// revision per ID. On failure we still record the note + bump the
+		// counter, so the user sees what happened and can retry.
+		regenerated, regenErr := m.regenerateIdea(target, req.Note, entry.RevisionCount)
+		if regenErr != nil {
+			http.Error(w, fmt.Sprintf("regenerate failed: %v", regenErr), http.StatusBadGateway)
+			return
+		}
+		if appendErr := m.appendIdeaRevision(target, regenerated); appendErr != nil {
+			http.Error(w, fmt.Sprintf("append revision failed: %v", appendErr), http.StatusInternalServerError)
+			return
+		}
+		// Mirror the regenerated body onto the target so the response shape
+		// already contains the new content (the client doesn't need a second
+		// round-trip to /api/ideas).
+		target.Title = regenerated.Title
+		target.Body = regenerated.Body
+		target.References = regenerated.References
+		target.Effort = regenerated.Effort
+		target.RiskIfWeDont = regenerated.RiskIfWeDont
+		target.FirstStep = regenerated.FirstStep
+		target.Synthesis = regenerated.Synthesis
 	case "archive":
 		entry.State = "archived"
 		entry.Note = req.Note
@@ -348,6 +405,138 @@ func (m *IdeasManager) handleAction(w http.ResponseWriter, r *http.Request) {
 	target.AcceptedBeadID = entry.AcceptedBeadID
 	target.LastTouchedTs = entry.LastTouchedTs
 	writeJSON(w, http.StatusOK, target)
+}
+
+// regenerateIdea shells out to `claude --print` with the persona's section
+// from PERSONA-PROMPTS.md as the system prompt and the original idea + the
+// user's revision note as input. Returns the parsed fileIdea ready to append
+// to the day's JSONL.
+//
+// The claude binary path is configurable via $AUREX_CLAUDE_BIN; defaults to
+// "claude" on PATH. Model defaults to claude-opus-4-7 — same Opus 4.7 the
+// project's senior agents use — but is overridable via $AUREX_REGEN_MODEL.
+// 5-minute hard timeout so a stuck regen can't hang the HTTP handler.
+func (m *IdeasManager) regenerateIdea(orig *Idea, note string, newRevision int) (fileIdea, error) {
+	var zero fileIdea
+	promptsPath := m.personaPromptsPath()
+	data, err := os.ReadFile(promptsPath)
+	if err != nil {
+		return zero, fmt.Errorf("read persona prompts: %w", err)
+	}
+	sections := parsePromptSections(string(data))
+	personaKey := strings.ToLower(strings.TrimSpace(orig.Persona))
+	personaPrompt := sections[personaKey]
+	if personaPrompt == "" {
+		return zero, fmt.Errorf("no persona section for %q in %s", orig.Persona, promptsPath)
+	}
+
+	// Build the system + user prompt. System is the persona prompt + shared
+	// guardrails so the regen stays in voice. User is the original idea (as
+	// the JSON shape the persona was trained against) plus the revision ask.
+	systemPrompt := strings.TrimSpace(sections["preamble"]) + "\n\n" +
+		strings.TrimSpace(personaPrompt) + "\n\n" +
+		strings.TrimSpace(sections["sharedGuardrails"])
+
+	origJSON, _ := json.MarshalIndent(map[string]any{
+		"id":              orig.ID,
+		"title":           orig.Title,
+		"body":            orig.Body,
+		"references":      orig.References,
+		"effort":          orig.Effort,
+		"risk_if_we_dont": orig.RiskIfWeDont,
+		"first_step":      orig.FirstStep,
+		"synthesis":       orig.Synthesis,
+	}, "", "  ")
+
+	userPrompt := fmt.Sprintf(`You previously produced this idea. The reviewer is sending it back for revision. Read the revision note carefully and produce a single updated idea in the EXACT same JSON shape. Keep the "id" field IDENTICAL. Update the title/body/references/effort/risk_if_we_dont/first_step/synthesis to address the note.
+
+Output rules:
+- Output ONE JSON object only. No markdown fences, no prose before or after.
+- The "body" field must materially address the reviewer's note. If they asked for more detail, expand. If they asked you to focus, focus.
+- Keep within the shared guardrails (no em-dashes, no hallucinations, body >= 300 chars, concrete first_step).
+
+ORIGINAL IDEA:
+%s
+
+REVIEWER NOTE (this is the revision ask):
+%s
+`, string(origJSON), strings.TrimSpace(note))
+
+	claudeBin := os.Getenv("AUREX_CLAUDE_BIN")
+	if claudeBin == "" {
+		claudeBin = "claude"
+	}
+	model := os.Getenv("AUREX_REGEN_MODEL")
+	if model == "" {
+		model = "claude-opus-4-7"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, claudeBin,
+		"--print",
+		"--model", model,
+		"--append-system-prompt", systemPrompt,
+		userPrompt,
+	)
+	cmd.Dir = m.RepoRoot
+	out, runErr := cmd.Output()
+	if ctx.Err() != nil {
+		return zero, fmt.Errorf("claude regen timed out after 5 min: %w", ctx.Err())
+	}
+	if runErr != nil {
+		stderr := ""
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		return zero, fmt.Errorf("claude exited non-zero: %w (stderr: %s)", runErr, stderr)
+	}
+
+	// Strip ```json fences if the model wraps despite instructions.
+	resp := strings.TrimSpace(string(out))
+	resp = strings.TrimPrefix(resp, "```json")
+	resp = strings.TrimPrefix(resp, "```")
+	resp = strings.TrimSuffix(resp, "```")
+	resp = strings.TrimSpace(resp)
+
+	var parsed fileIdea
+	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
+		preview := resp
+		if len(preview) > 400 {
+			preview = preview[:400] + "..."
+		}
+		return zero, fmt.Errorf("parse claude response as fileIdea: %w (response head: %s)", err, preview)
+	}
+	if parsed.ID != orig.ID {
+		// Force the original ID — the regen must not invent a new one or our
+		// loadAll dedup-by-ID falls apart.
+		parsed.ID = orig.ID
+	}
+	parsed.Persona = orig.Persona
+	parsed.Date = orig.Date
+	parsed.Revision = newRevision
+	return parsed, nil
+}
+
+// appendIdeaRevision writes a new JSONL line to the same per-day file the
+// original idea lives in. loadAll dedupes by ID so the most-recent revision
+// becomes the canonical one.
+func (m *IdeasManager) appendIdeaRevision(orig *Idea, fi fileIdea) error {
+	name := fmt.Sprintf("%s-%s.jsonl", orig.Date, strings.ToLower(orig.Persona))
+	path := filepath.Join(m.DataRoot, name)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc, err := json.Marshal(fi)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(enc, '\n')); err != nil {
+		return err
+	}
+	return nil
 }
 
 // runBdCreate shells out to `bd create` with the idea body. We run from the
