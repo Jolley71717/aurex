@@ -48,6 +48,13 @@ func main() {
 	if cfg.IdeasDataRoot != "" {
 		ideas = NewIdeasManager(cfg.IdeasDataRoot, cfg.IdeasRepoRoot)
 		log.Printf("aurex: ideas surface enabled at %s (repo: %s)", cfg.IdeasDataRoot, cfg.IdeasRepoRoot)
+		// Background poller: every 10 s, scan _paperclip-dispatches.json for
+		// outstanding Revise/Generate work and apply any JSON comments the
+		// persona agents have posted. Self-cancels when the process exits;
+		// context.Background is fine here — aurex doesn't have graceful
+		// shutdown semantics for its sub-loops.
+		ideas.StartPaperclipPoller(context.Background(), 10*time.Second)
+		log.Printf("aurex: paperclip dispatch poller running every 10s")
 	}
 	var beads *BeadsManager
 	if cfg.BeadsRepoRoot != "" {

@@ -376,31 +376,21 @@ func (m *IdeasManager) handleAction(w http.ResponseWriter, r *http.Request) {
 		entry.State = "needs-revision"
 		entry.Note = req.Note
 		entry.RevisionCount = entry.RevisionCount + 1
-		// Regenerate the idea body via the same persona that produced it,
-		// running through `claude --print` with the persona section from
-		// PERSONA-PROMPTS.md. On success we append a new fileIdea to the
-		// JSONL with Revision=entry.RevisionCount; loadAll picks the highest
-		// revision per ID. On failure we still record the note + bump the
-		// counter, so the user sees what happened and can retry.
-		regenerated, regenErr := m.regenerateIdea(target, req.Note, entry.RevisionCount)
-		if regenErr != nil {
-			http.Error(w, fmt.Sprintf("regenerate failed: %v", regenErr), http.StatusBadGateway)
+		// Hand the actual regen off to Paperclip — the persona agent over
+		// there runs claude in its own auth context (OAuth keychain works,
+		// API key works, model fallback works). Aurex returns immediately
+		// with the Paperclip issue identifier; the background poller picks
+		// up the result comment when the agent posts it.
+		issueID, dispErr := m.dispatchRevise(target, req.Note, entry.RevisionCount)
+		if dispErr != nil {
+			http.Error(w, fmt.Sprintf("paperclip dispatch failed: %v", dispErr), http.StatusBadGateway)
 			return
 		}
-		if appendErr := m.appendIdeaRevision(target, regenerated); appendErr != nil {
-			http.Error(w, fmt.Sprintf("append revision failed: %v", appendErr), http.StatusInternalServerError)
-			return
-		}
-		// Mirror the regenerated body onto the target so the response shape
-		// already contains the new content (the client doesn't need a second
-		// round-trip to /api/ideas).
-		target.Title = regenerated.Title
-		target.Body = regenerated.Body
-		target.References = regenerated.References
-		target.Effort = regenerated.Effort
-		target.RiskIfWeDont = regenerated.RiskIfWeDont
-		target.FirstStep = regenerated.FirstStep
-		target.Synthesis = regenerated.Synthesis
+		entry.PaperclipError = ""
+		// Reuse AcceptedPaperclipID as the "in-flight Paperclip ref" so the
+		// UI can show "in review at UNC-NNN". A real Accept later moves this
+		// to its own slot.
+		target.AcceptedPaperclipID = issueID
 	case "archive":
 		entry.State = "archived"
 		entry.Note = req.Note
@@ -427,124 +417,117 @@ func (m *IdeasManager) handleAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, target)
 }
 
-// runLLM dispatches to the configured LLM. It returns the stripped string
-// content (markdown fences removed) ready for JSON parsing by the caller.
+// ----- Paperclip persona dispatch -------------------------------------------
 //
-// Strategy:
-//   1. Try claude --print. Fast, persona-tuned, what we'd prefer.
-//   2. On any claude failure (auth, exit nonzero, timeout), fall back to a
-//      POST against local Ollama qwen2.5:14b. Free, no auth, ~3-15 s per
-//      response, runs on Mac Mini 2.
-//   3. Aggregate errors so the operator sees both failure causes if both
-//      paths fail.
+// "Send back for revision" and "+ Generate" both hand off to Paperclip rather
+// than running claude locally. Reasons:
+//   - Paperclip's claude_local adapter runs claude in the user's interactive
+//     session via the Paperclip daemon, so OAuth keychain auth works (aurex
+//     under launchd can't reach the same keychain).
+//   - The CTO / CEO / etc. agents already exist with the right persona prompts
+//     and Opus 4.7 model selection. No reason to duplicate that wiring here.
+//   - Result arrives as an issue comment in Paperclip's Postgres. Aurex polls
+//     the issue for the JSON-fenced comment and applies the result locally.
 //
-// Env knobs:
-//   AUREX_LLM=claude|ollama|claude-then-ollama  default = claude-then-ollama
-//   AUREX_CLAUDE_BIN  path to claude (auto-resolved by default)
-//   AUREX_REGEN_MODEL claude model (default claude-opus-4-7)
-//   AUREX_OLLAMA_URL  Ollama endpoint (default http://192.168.0.40:11434)
-//   AUREX_OLLAMA_MODEL Ollama model (default qwen2.5:14b-instruct-q4_K_M)
-func runLLM(workDir, systemPrompt, userPrompt string) (string, error) {
-	mode := strings.TrimSpace(os.Getenv("AUREX_LLM"))
-	if mode == "" {
-		mode = "claude-then-ollama"
-	}
-	var claudeErr, ollamaErr error
-	if mode == "claude" || mode == "claude-then-ollama" {
-		out, err := runClaudePrint(workDir, systemPrompt, userPrompt)
-		if err == nil {
-			return stripFences(out), nil
-		}
-		claudeErr = err
-		if mode == "claude" {
-			return "", fmt.Errorf("claude regen failed: %w", err)
-		}
-	}
-	if mode == "ollama" || mode == "claude-then-ollama" {
-		out, err := runOllamaGenerate(systemPrompt, userPrompt)
-		if err == nil {
-			return stripFences(out), nil
-		}
-		ollamaErr = err
-	}
-	if claudeErr != nil && ollamaErr != nil {
-		return "", fmt.Errorf("both LLM paths failed; claude: %v; ollama: %v", claudeErr, ollamaErr)
-	}
-	if ollamaErr != nil {
-		return "", fmt.Errorf("ollama regen failed: %w", ollamaErr)
-	}
-	return "", fmt.Errorf("LLM mode %q produced no output", mode)
+// Dispatches are tracked in _paperclip-dispatches.json next to the existing
+// _review-state.json sidecar so a daemon restart doesn't lose pending work.
+
+const dispatchesFileName = "_paperclip-dispatches.json"
+
+type paperclipDispatch struct {
+	Kind             string    `json:"kind"` // "revise" | "generate"
+	Persona          string    `json:"persona"`
+	Date             string    `json:"date"`
+	IdeaID           string    `json:"idea_id,omitempty"`   // revise only
+	Revision         int       `json:"revision,omitempty"`  // revise only
+	PaperclipIssueID string    `json:"paperclip_issue_id"`
+	IssuedAt         time.Time `json:"issued_at"`
+	LastCheckedAt    time.Time `json:"last_checked_at,omitempty"`
+	Failures         int       `json:"failures,omitempty"`
 }
 
-func stripFences(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	return strings.TrimSpace(s)
+func (m *IdeasManager) dispatchesPath() string {
+	return filepath.Join(m.DataRoot, dispatchesFileName)
 }
 
-// runClaudePrint shells `claude --print ...` and returns stdout.
-func runClaudePrint(workDir, systemPrompt, userPrompt string) (string, error) {
-	claudeBin, err := resolveClaudeBin()
+func (m *IdeasManager) loadDispatches() (map[string]*paperclipDispatch, error) {
+	data, err := os.ReadFile(m.dispatchesPath())
 	if err != nil {
-		return "", err
-	}
-	model := paperclipEnv("AUREX_REGEN_MODEL", "claude-opus-4-7")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, claudeBin,
-		"--print",
-		"--model", model,
-		"--append-system-prompt", systemPrompt,
-		userPrompt,
-	)
-	cmd.Dir = workDir
-	// Close stdin explicitly so claude doesn't sit for 3s on the "no stdin
-	// data" wait under launchd (where there's no controlling TTY).
-	cmd.Stdin = strings.NewReader("")
-	out, runErr := cmd.Output()
-	if ctx.Err() != nil {
-		return "", fmt.Errorf("claude timed out after 5 min: %w", ctx.Err())
-	}
-	if runErr != nil {
-		stderr := ""
-		stdoutStr := strings.TrimSpace(string(out))
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		if os.IsNotExist(err) {
+			return map[string]*paperclipDispatch{}, nil
 		}
-		hint := ""
-		if strings.Contains(stderr, "Not logged in") || strings.Contains(stdoutStr, "Not logged in") {
-			hint = " (claude keychain auth not accessible under launchd — set ANTHROPIC_API_KEY in the LaunchAgent env, or rely on the ollama fallback)"
-		}
-		return "", fmt.Errorf("claude exited %v (stderr=%q, stdout=%q)%s", runErr, stderr, stdoutStr, hint)
+		return nil, err
 	}
-	return string(out), nil
+	d := map[string]*paperclipDispatch{}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return map[string]*paperclipDispatch{}, err
+	}
+	return d, nil
 }
 
-// runOllamaGenerate POSTs against Ollama's /api/generate endpoint.
-func runOllamaGenerate(systemPrompt, userPrompt string) (string, error) {
-	baseURL := paperclipEnv("AUREX_OLLAMA_URL", "http://192.168.0.40:11434")
-	model := paperclipEnv("AUREX_OLLAMA_MODEL", "qwen2.5:14b-instruct-q4_K_M")
+func (m *IdeasManager) saveDispatches(d map[string]*paperclipDispatch) error {
+	if err := os.MkdirAll(m.DataRoot, 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(m.dispatchesPath(), b, 0o644)
+}
+
+// personaAgentID maps a persona ID (CEO / CTO / CMO / CFO / CPO) to the
+// Paperclip agent UUID that should own its dispatched work. Falls back to
+// the CEO agent for any persona we don't have a dedicated agent for yet.
+// Override via $AUREX_PAPERCLIP_AGENT_<PERSONA>.
+func personaAgentID(persona string) string {
+	p := strings.ToUpper(strings.TrimSpace(persona))
+	if v := strings.TrimSpace(os.Getenv("AUREX_PAPERCLIP_AGENT_" + p)); v != "" {
+		return v
+	}
+	defaults := map[string]string{
+		"CEO": "2b335bd6-eff4-42db-a598-15de5070829f",
+		"CTO": "b851177c-67db-4009-96c7-eba62a4c7ab4",
+		"CMO": "afb24047-f7bc-45c7-8d8d-658ee330a534",
+		"CFO": "d73289dd-7fb6-4a3d-8f62-2910b24c30eb",
+		"CPO": "87ccb7d6-8003-4bb5-b75a-a9592a411d57",
+	}
+	if v, ok := defaults[p]; ok {
+		return v
+	}
+	return defaults["CTO"]
+}
+
+// dispatchToPaperclip POSTs a new Paperclip issue with the given title, body,
+// and assignee. Returns Paperclip's friendly identifier (e.g. "UNC-128") so
+// the UI and the dispatch sidecar can reference it.
+func (m *IdeasManager) dispatchToPaperclip(title, description, assigneeAgentID string) (string, error) {
+	baseURL := paperclipEnv("PAPERCLIP_BASE_URL", defaultPaperclipBaseURL)
+	companyID := paperclipEnv("PAPERCLIP_COMPANY_ID", defaultPaperclipCompanyID)
+	token := paperclipToken()
+	if token == "" {
+		return "", fmt.Errorf("no Paperclip board API key — populate %s (mode 0600)", paperclipEnv("PAPERCLIP_TOKEN_FILE", defaultPaperclipTokenFile))
+	}
 	payload, _ := json.Marshal(map[string]any{
-		"model":  model,
-		"system": systemPrompt,
-		"prompt": userPrompt,
-		"stream": false,
+		"title":           title,
+		"description":     description,
+		"status":          "todo",
+		"priority":        "medium",
+		"assigneeAgentId": assigneeAgentID,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		strings.TrimRight(baseURL, "/")+"/api/generate",
-		strings.NewReader(string(payload)),
-	)
+		strings.TrimRight(baseURL, "/")+"/api/companies/"+companyID+"/issues",
+		strings.NewReader(string(payload)))
 	if err != nil {
 		return "", err
 	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ollama POST failed: %w", err)
+		return "", fmt.Errorf("paperclip POST failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -553,159 +536,210 @@ func runOllamaGenerate(systemPrompt, userPrompt string) (string, error) {
 		if len(preview) > 300 {
 			preview = preview[:300] + "..."
 		}
-		return "", fmt.Errorf("ollama returned HTTP %d: %s", resp.StatusCode, preview)
+		return "", fmt.Errorf("paperclip HTTP %d: %s", resp.StatusCode, preview)
 	}
 	var parsed struct {
-		Response string `json:"response"`
+		ID         string `json:"id"`
+		Identifier string `json:"identifier"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", fmt.Errorf("parse ollama response: %w", err)
+		return "", fmt.Errorf("parse paperclip response: %w", err)
 	}
-	return parsed.Response, nil
+	if parsed.Identifier == "" {
+		parsed.Identifier = parsed.ID
+	}
+	return parsed.Identifier, nil
 }
 
-// resolveClaudeBin finds an executable `claude` binary. Order matters:
-//   1. $AUREX_CLAUDE_BIN if set and the file exists.
-//   2. Well-known install paths for the REAL Anthropic claude binary. These
-//      are checked BEFORE PATH lookup because the cmux app bundle ships a
-//      17-byte shim at /Applications/cmux.app/Contents/Resources/bin/claude
-//      that takes priority in the LaunchAgent's PATH but exits 127 ("claude
-//      not found in PATH") when invoked under launchd. The shim is intended
-//      to forward to a real claude on the user's PATH — but launchd's PATH
-//      doesn't include $HOME/.local/bin where the real one lives, so the
-//      shim's forward fails. Picking the real binary directly sidesteps the
-//      shim entirely.
-//   3. exec.LookPath("claude") — fallback for nonstandard installs.
-//
-// Returns the absolute path or a descriptive error.
-func resolveClaudeBin() (string, error) {
-	if env := strings.TrimSpace(os.Getenv("AUREX_CLAUDE_BIN")); env != "" {
-		if _, err := os.Stat(env); err == nil {
-			return env, nil
-		}
+// paperclipFetchIssueComments fetches the comments thread on a Paperclip
+// issue identified by its friendly identifier (e.g. UNC-128).
+func paperclipFetchIssueComments(issueIdentifier string) ([]string, error) {
+	baseURL := paperclipEnv("PAPERCLIP_BASE_URL", defaultPaperclipBaseURL)
+	token := paperclipToken()
+	if token == "" {
+		return nil, fmt.Errorf("no Paperclip token")
 	}
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		filepath.Join(home, ".local/bin/claude"),
-		"/opt/homebrew/bin/claude",
-		"/usr/local/bin/claude",
-	}
-	for _, p := range candidates {
-		fi, err := os.Stat(p)
-		if err != nil {
-			continue
-		}
-		// Reject pathological zero-size or sub-1KB "shim" files — the real
-		// claude is multi-MB.
-		if fi.Size() < 1024 {
-			continue
-		}
-		return p, nil
-	}
-	if p, err := exec.LookPath("claude"); err == nil {
-		if fi, statErr := os.Stat(p); statErr == nil && fi.Size() >= 1024 {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("real claude binary not found — set AUREX_CLAUDE_BIN or install at one of: %s", strings.Join(candidates, ", "))
-}
-
-// regenerateIdea produces an updated fileIdea body via the persona's prompt.
-// Primary path: shell `claude --print`. Fallback: POST to local Ollama. The
-// claude path is preferred because the persona prompts are tuned to Claude's
-// voice, but under launchd it fails on keychain auth (the OAuth credentials
-// live in a keychain item only the user's interactive session can read). The
-// Ollama fallback uses qwen2.5:14b on Mac Mini 2, which is what the project
-// uses for i18n / AI services and produces good enough output for revisions.
-//
-// Auth-fix-it knob for the user: set ANTHROPIC_API_KEY in the LaunchAgent
-// env (or write it to /Users/lukedutton/aurex/.anthropic-key and have
-// launch-helper.sh export it) — claude will then use the API key instead of
-// the OAuth keychain and the primary path works under launchd too.
-//
-// $AUREX_CLAUDE_BIN overrides the claude binary path. $AUREX_REGEN_MODEL
-// overrides the claude model (default claude-opus-4-7). $AUREX_OLLAMA_URL
-// and $AUREX_OLLAMA_MODEL override the fallback.
-func (m *IdeasManager) regenerateIdea(orig *Idea, note string, newRevision int) (fileIdea, error) {
-	var zero fileIdea
-	promptsPath := m.personaPromptsPath()
-	data, err := os.ReadFile(promptsPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	url := strings.TrimRight(baseURL, "/") + "/api/issues/" + strings.ToLower(issueIdentifier) + "/comments"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return zero, fmt.Errorf("read persona prompts: %w", err)
+		return nil, err
 	}
-	sections := parsePromptSections(string(data))
-	personaKey := strings.ToLower(strings.TrimSpace(orig.Persona))
-	personaPrompt := sections[personaKey]
-	if personaPrompt == "" {
-		return zero, fmt.Errorf("no persona section for %q in %s", orig.Persona, promptsPath)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
 	}
-
-	// Build the system + user prompt. System is the persona prompt + shared
-	// guardrails so the regen stays in voice. User is the original idea (as
-	// the JSON shape the persona was trained against) plus the revision ask.
-	systemPrompt := strings.TrimSpace(sections["preamble"]) + "\n\n" +
-		strings.TrimSpace(personaPrompt) + "\n\n" +
-		strings.TrimSpace(sections["sharedGuardrails"])
-
-	origJSON, _ := json.MarshalIndent(map[string]any{
-		"id":              orig.ID,
-		"title":           orig.Title,
-		"body":            orig.Body,
-		"references":      orig.References,
-		"effort":          orig.Effort,
-		"risk_if_we_dont": orig.RiskIfWeDont,
-		"first_step":      orig.FirstStep,
-		"synthesis":       orig.Synthesis,
-	}, "", "  ")
-
-	userPrompt := fmt.Sprintf(`You previously produced this idea. The reviewer is sending it back for revision. Read the revision note carefully and produce a single updated idea in the EXACT same JSON shape. Keep the "id" field IDENTICAL. Update the title/body/references/effort/risk_if_we_dont/first_step/synthesis to address the note.
-
-Output rules:
-- Output ONE JSON object only. No markdown fences, no prose before or after.
-- The "body" field must materially address the reviewer's note. If they asked for more detail, expand. If they asked you to focus, focus.
-- Keep within the shared guardrails (no em-dashes, no hallucinations, body >= 300 chars, concrete first_step).
-
-ORIGINAL IDEA:
-%s
-
-REVIEWER NOTE (this is the revision ask):
-%s
-`, string(origJSON), strings.TrimSpace(note))
-
-	resp, llmErr := runLLM(m.RepoRoot, systemPrompt, userPrompt)
-	if llmErr != nil {
-		return zero, llmErr
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("paperclip GET comments HTTP %d", resp.StatusCode)
 	}
-
-	resp = strings.TrimPrefix(resp, "```json")
-	resp = strings.TrimPrefix(resp, "```")
-	resp = strings.TrimSuffix(resp, "```")
-	resp = strings.TrimSpace(resp)
-
-	var parsed fileIdea
-	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
-		preview := resp
-		if len(preview) > 400 {
-			preview = preview[:400] + "..."
+	body, _ := io.ReadAll(resp.Body)
+	// API returns either an array of comments or {"comments": [...]} depending
+	// on Paperclip version. Accept both.
+	var asArray []struct {
+		Body          string `json:"body"`
+		AuthorAgentID string `json:"authorAgentId"`
+	}
+	if err := json.Unmarshal(body, &asArray); err == nil {
+		out := make([]string, 0, len(asArray))
+		for _, c := range asArray {
+			if c.AuthorAgentID != "" {
+				out = append(out, c.Body)
+			}
 		}
-		return zero, fmt.Errorf("parse claude response as fileIdea: %w (response head: %s)", err, preview)
+		return out, nil
 	}
-	if parsed.ID != orig.ID {
-		// Force the original ID — the regen must not invent a new one or our
-		// loadAll dedup-by-ID falls apart.
-		parsed.ID = orig.ID
+	var asObject struct {
+		Comments []struct {
+			Body          string `json:"body"`
+			AuthorAgentID string `json:"authorAgentId"`
+		} `json:"comments"`
 	}
-	parsed.Persona = orig.Persona
-	parsed.Date = orig.Date
-	parsed.Revision = newRevision
-	return parsed, nil
+	if err := json.Unmarshal(body, &asObject); err == nil {
+		out := make([]string, 0, len(asObject.Comments))
+		for _, c := range asObject.Comments {
+			if c.AuthorAgentID != "" {
+				out = append(out, c.Body)
+			}
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("paperclip comments response had unexpected shape")
 }
 
-// appendIdeaRevision writes a new JSONL line to the same per-day file the
-// original idea lives in. loadAll dedupes by ID so the most-recent revision
-// becomes the canonical one.
-func (m *IdeasManager) appendIdeaRevision(orig *Idea, fi fileIdea) error {
-	name := fmt.Sprintf("%s-%s.jsonl", orig.Date, strings.ToLower(orig.Persona))
+// extractJSONBlock pulls a fenced ```json block out of a markdown comment.
+// Falls back to scanning for the first top-level JSON object if no fence is
+// present. Returns the raw JSON string (no fences) or an error.
+func extractJSONBlock(comment string) (string, error) {
+	c := strings.TrimSpace(comment)
+	if idx := strings.Index(c, "```json"); idx != -1 {
+		rest := c[idx+len("```json"):]
+		if end := strings.Index(rest, "```"); end != -1 {
+			return strings.TrimSpace(rest[:end]), nil
+		}
+	}
+	if idx := strings.Index(c, "```"); idx != -1 {
+		rest := c[idx+len("```"):]
+		if end := strings.Index(rest, "```"); end != -1 {
+			candidate := strings.TrimSpace(rest[:end])
+			if strings.HasPrefix(candidate, "{") || strings.HasPrefix(candidate, "[") {
+				return candidate, nil
+			}
+		}
+	}
+	// Final fallback — find the first { ... } that parses as JSON.
+	if start := strings.Index(c, "{"); start != -1 {
+		// Naive brace-balanced extraction.
+		depth := 0
+		for i := start; i < len(c); i++ {
+			switch c[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					return c[start : i+1], nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("no JSON block found in comment")
+}
+
+// pollPaperclipDispatches scans every open dispatch and, for each, fetches
+// Paperclip's comments and tries to apply a parseable JSON result. Drops
+// applied entries from the sidecar. Designed to run on a 10s ticker in a
+// background goroutine started by main.
+func (m *IdeasManager) pollPaperclipDispatches() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dispatches, err := m.loadDispatches()
+	if err != nil || len(dispatches) == 0 {
+		return
+	}
+	changed := false
+	for key, d := range dispatches {
+		comments, err := paperclipFetchIssueComments(d.PaperclipIssueID)
+		d.LastCheckedAt = time.Now().UTC()
+		if err != nil {
+			d.Failures++
+			continue
+		}
+		applied := false
+		for _, c := range comments {
+			jsonStr, err := extractJSONBlock(c)
+			if err != nil {
+				continue
+			}
+			if d.Kind == "revise" {
+				if err := m.applyRevisionResultLocked(d, jsonStr); err == nil {
+					applied = true
+					break
+				}
+			} else if d.Kind == "generate" {
+				if err := m.applyGenerationResultLocked(d, jsonStr); err == nil {
+					applied = true
+					break
+				}
+			}
+		}
+		if applied {
+			delete(dispatches, key)
+			changed = true
+		}
+	}
+	if changed {
+		_ = m.saveDispatches(dispatches)
+	} else {
+		_ = m.saveDispatches(dispatches) // persist LastCheckedAt + Failures
+	}
+}
+
+// StartPaperclipPoller runs pollPaperclipDispatches every interval until ctx
+// is cancelled. Call from main once at startup.
+func (m *IdeasManager) StartPaperclipPoller(ctx context.Context, interval time.Duration) {
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.pollPaperclipDispatches()
+			}
+		}
+	}()
+}
+
+// applyRevisionResultLocked parses the JSON returned by the persona agent and
+// appends a new JSONL line for the idea with the bumped revision. Caller
+// must hold m.mu.
+func (m *IdeasManager) applyRevisionResultLocked(d *paperclipDispatch, jsonStr string) error {
+	var fi fileIdea
+	if err := json.Unmarshal([]byte(jsonStr), &fi); err != nil {
+		return fmt.Errorf("parse revision JSON: %w", err)
+	}
+	if fi.ID != "" && fi.ID != d.IdeaID {
+		// Force original ID — agent must not invent a new one.
+		fi.ID = d.IdeaID
+	} else if fi.ID == "" {
+		fi.ID = d.IdeaID
+	}
+	fi.Persona = strings.ToUpper(strings.TrimSpace(fi.Persona))
+	if fi.Persona == "" {
+		fi.Persona = d.Persona
+	}
+	if fi.Date == "" {
+		fi.Date = d.Date
+	}
+	fi.Revision = d.Revision
+	if fi.Body == "" {
+		return fmt.Errorf("regenerated idea has empty body")
+	}
+	name := fmt.Sprintf("%s-%s.jsonl", fi.Date, strings.ToLower(fi.Persona))
 	path := filepath.Join(m.DataRoot, name)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
@@ -720,6 +754,186 @@ func (m *IdeasManager) appendIdeaRevision(orig *Idea, fi fileIdea) error {
 		return err
 	}
 	return nil
+}
+
+// applyGenerationResultLocked parses the JSON returned by the persona agent
+// (expected shape: {persona, date, ideas: [fileIdea...]}) and appends each
+// idea to today's JSONL after renumbering IDs to avoid collisions. Caller
+// must hold m.mu.
+func (m *IdeasManager) applyGenerationResultLocked(d *paperclipDispatch, jsonStr string) error {
+	var parsed struct {
+		Persona string     `json:"persona"`
+		Date    string     `json:"date"`
+		Ideas   []fileIdea `json:"ideas"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		return fmt.Errorf("parse generation JSON: %w", err)
+	}
+	if len(parsed.Ideas) == 0 {
+		return fmt.Errorf("generation returned zero ideas")
+	}
+	persona := strings.ToUpper(strings.TrimSpace(parsed.Persona))
+	if persona == "" {
+		persona = d.Persona
+	}
+	date := parsed.Date
+	if date == "" {
+		date = d.Date
+	}
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+	maxCounter := m.maxIdeaCounter(persona, date)
+	for i := range parsed.Ideas {
+		fi := parsed.Ideas[i]
+		if fi.Persona == "" {
+			fi.Persona = persona
+		}
+		if fi.Date == "" {
+			fi.Date = date
+		}
+		maxCounter++
+		fi.ID = fmt.Sprintf("%s-%s-%02d", strings.ToLower(persona), fi.Date, maxCounter)
+		if err := m.appendNewIdea(fi); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dispatchRevise hands the regen off to Paperclip: posts a Revise issue
+// assigned to the matching persona agent, records the dispatch in the
+// sidecar so the background poller can apply the result later, and returns
+// the Paperclip issue identifier (e.g. "UNC-128"). No LLM call happens in
+// the aurex process — claude runs inside Paperclip's claude_local adapter
+// where keychain auth works.
+func (m *IdeasManager) dispatchRevise(orig *Idea, note string, newRevision int) (string, error) {
+	promptsPath := m.personaPromptsPath()
+	data, err := os.ReadFile(promptsPath)
+	if err != nil {
+		return "", fmt.Errorf("read persona prompts: %w", err)
+	}
+	sections := parsePromptSections(string(data))
+	personaKey := strings.ToLower(strings.TrimSpace(orig.Persona))
+	personaPrompt := sections[personaKey]
+	if personaPrompt == "" {
+		return "", fmt.Errorf("no persona section for %q", orig.Persona)
+	}
+	origJSON, _ := json.MarshalIndent(map[string]any{
+		"id":              orig.ID,
+		"title":           orig.Title,
+		"body":            orig.Body,
+		"references":      orig.References,
+		"effort":          orig.Effort,
+		"risk_if_we_dont": orig.RiskIfWeDont,
+		"first_step":      orig.FirstStep,
+		"synthesis":       orig.Synthesis,
+	}, "", "  ")
+	title := fmt.Sprintf("Revise idea: %s", strings.TrimSpace(orig.Title))
+	if len(title) > 200 {
+		title = title[:197] + "..."
+	}
+	desc := fmt.Sprintf(`You are acting as the %s persona for the aurex Ideas inbox. The user is sending this idea back for revision. Read the revision note and produce a single updated idea in the same JSON shape, then **post the result as a comment on this issue inside a fenced ` + "```json" + ` block**. Do not edit the issue description; do not open new beads. Just comment with the JSON.
+
+## Persona context
+%s
+
+## Original idea
+` + "```json" + `
+%s
+` + "```" + `
+
+## Revision note (this is what the reviewer wants changed)
+%s
+
+## Output contract
+- Reply with a comment on this issue.
+- The comment must contain a fenced ` + "```json" + ` block holding a single object with these fields: id, title, body, references[], effort, risk_if_we_dont, first_step, synthesis.
+- The "id" field MUST be exactly: %s
+- The "body" must materially address the revision note (expand, focus, add numbers — whatever the note asks for).
+- Body >= 300 chars. No em-dashes. No invented facts.
+- Once you post the comment, mark the issue as done.
+`,
+		strings.ToUpper(orig.Persona),
+		strings.TrimSpace(personaPrompt),
+		string(origJSON),
+		strings.TrimSpace(note),
+		orig.ID,
+	)
+	agentID := personaAgentID(orig.Persona)
+	issueID, err := m.dispatchToPaperclip(title, desc, agentID)
+	if err != nil {
+		return "", err
+	}
+	// Record the dispatch so the poller knows to apply the result.
+	dispatches, _ := m.loadDispatches()
+	dispatches[orig.ID] = &paperclipDispatch{
+		Kind:             "revise",
+		Persona:          strings.ToUpper(orig.Persona),
+		Date:             orig.Date,
+		IdeaID:           orig.ID,
+		Revision:         newRevision,
+		PaperclipIssueID: issueID,
+		IssuedAt:         time.Now().UTC(),
+	}
+	if err := m.saveDispatches(dispatches); err != nil {
+		return "", fmt.Errorf("save dispatch sidecar: %w", err)
+	}
+	return issueID, nil
+}
+
+// dispatchGenerate hands the "Generate N new ideas" request off to the
+// persona agent in Paperclip. Returns the Paperclip issue identifier.
+func (m *IdeasManager) dispatchGenerate(persona string, count int) (string, error) {
+	promptsPath := m.personaPromptsPath()
+	data, err := os.ReadFile(promptsPath)
+	if err != nil {
+		return "", fmt.Errorf("read persona prompts: %w", err)
+	}
+	sections := parsePromptSections(string(data))
+	personaKey := strings.ToLower(strings.TrimSpace(persona))
+	personaPrompt := sections[personaKey]
+	if personaPrompt == "" {
+		return "", fmt.Errorf("no persona section for %q", persona)
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	title := fmt.Sprintf("Generate %d new %s ideas (%s)", count, strings.ToUpper(persona), today)
+	desc := fmt.Sprintf(`You are acting as the %s persona for the aurex Ideas inbox. Generate %d new ideas for today (%s), grounded in current repo state. Read recent commits, bd ready, and the recently declined ideas log before generating. Do not repropose what was declined.
+
+## Persona context
+%s
+
+## Output contract
+- Reply with a comment on this issue.
+- The comment must contain a fenced ` + "```json" + ` block holding ONE object: {"persona": "%s", "date": "%s", "ideas": [ { ... }, ... ]}.
+- Each idea: {id?: string (optional, the aurex side will renumber), title, body (>= 300 chars), references[], effort (S|M|L|XL), risk_if_we_dont, first_step, synthesis (optional)}.
+- No em-dashes. No invented facts. Each idea must have a concrete first_step.
+- Once you post the comment, mark the issue as done.
+`,
+		strings.ToUpper(persona),
+		count,
+		today,
+		strings.TrimSpace(personaPrompt),
+		strings.ToUpper(persona),
+		today,
+	)
+	agentID := personaAgentID(persona)
+	issueID, err := m.dispatchToPaperclip(title, desc, agentID)
+	if err != nil {
+		return "", err
+	}
+	dispatches, _ := m.loadDispatches()
+	dispatches["generate:"+strings.ToUpper(persona)+":"+today+":"+issueID] = &paperclipDispatch{
+		Kind:             "generate",
+		Persona:          strings.ToUpper(persona),
+		Date:             today,
+		PaperclipIssueID: issueID,
+		IssuedAt:         time.Now().UTC(),
+	}
+	if err := m.saveDispatches(dispatches); err != nil {
+		return "", fmt.Errorf("save dispatch sidecar: %w", err)
+	}
+	return issueID, nil
 }
 
 // runBdCreate shells out to `bd create` with the idea body. We run from the
@@ -919,11 +1133,10 @@ type generateIdeasRequest struct {
 	Count   int    `json:"count,omitempty"`   // hint: 3-5; default 3
 }
 
-// handleGenerateIdeas spawns a one-shot run of the persona prompt against
-// `claude --print` and appends 3-5 new ideas to today's <persona>.jsonl.
-// This is the "Generate more from <persona>" button on IdeasPage. It is
-// synchronous from the HTTP client's perspective (typical claude latency is
-// 10-40s on Opus 4.7).
+// handleGenerateIdeas dispatches a "Generate N new <persona> ideas" issue to
+// the persona's Paperclip agent and returns 202 with the Paperclip issue
+// identifier. The background poller applies the result to today's JSONL
+// when the agent posts its JSON comment.
 func (m *IdeasManager) handleGenerateIdeas(w http.ResponseWriter, r *http.Request) {
 	var req generateIdeasRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -948,110 +1161,17 @@ func (m *IdeasManager) handleGenerateIdeas(w http.ResponseWriter, r *http.Reques
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	promptsPath := m.personaPromptsPath()
-	data, err := os.ReadFile(promptsPath)
+	issueID, err := m.dispatchGenerate(persona, count)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("read persona prompts: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("paperclip dispatch failed: %v", err), http.StatusBadGateway)
 		return
 	}
-	sections := parsePromptSections(string(data))
-	personaPrompt := sections[strings.ToLower(persona)]
-	if personaPrompt == "" {
-		http.Error(w, fmt.Sprintf("no persona section for %s in %s", persona, promptsPath), http.StatusInternalServerError)
-		return
-	}
-
-	// Shared context block. Bounded so we don't blow up the prompt.
-	contextBlock := m.buildSharedContext()
-
-	systemPrompt := strings.TrimSpace(sections["preamble"]) + "\n\n" +
-		strings.TrimSpace(personaPrompt) + "\n\n" +
-		strings.TrimSpace(sections["sharedGuardrails"])
-
-	today := time.Now().UTC().Format("2006-01-02")
-	userPrompt := fmt.Sprintf(`Produce %d new ideas for today (%s) as the %s.
-
-Ground each idea in the context block below — do NOT invent facts, code paths, or competitors that aren't in the context. If you don't have a real reference, say so explicitly. Read the recent declined-ideas log if any are listed; don't repropose what the user already rejected.
-
-Output rules:
-- Output ONE JSON object only. No markdown fences, no prose before or after.
-- Shape: {"persona": %q, "date": %q, "ideas": [ {...}, {...}, ... ]}
-- Each idea object: { "id": "<lowercase-persona>-<date>-<NN>", "title": "...", "body": ">= 300 chars", "references": [...], "effort": "S|M|L|XL", "risk_if_we_dont": "...", "first_step": "..." }
-- Use IDs that don't collide with existing ones from today (counter starts at the next free slot).
-- No em-dashes anywhere in the output (project rule — use hyphens or rephrase).
-
-SHARED CONTEXT:
-%s
-`, count, today, persona, persona, today, contextBlock)
-
-	respStr, llmErr := runLLM(m.RepoRoot, systemPrompt, userPrompt)
-	if llmErr != nil {
-		http.Error(w, llmErr.Error(), http.StatusBadGateway)
-		return
-	}
-	resp := strings.TrimSpace(respStr)
-	resp = strings.TrimPrefix(resp, "```json")
-	resp = strings.TrimPrefix(resp, "```")
-	resp = strings.TrimSuffix(resp, "```")
-	resp = strings.TrimSpace(resp)
-
-	var parsed struct {
-		Persona string     `json:"persona"`
-		Date    string     `json:"date"`
-		Ideas   []fileIdea `json:"ideas"`
-	}
-	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
-		preview := resp
-		if len(preview) > 400 {
-			preview = preview[:400] + "..."
-		}
-		http.Error(w, fmt.Sprintf("parse claude response: %v (head: %s)", err, preview), http.StatusBadGateway)
-		return
-	}
-	if len(parsed.Ideas) == 0 {
-		http.Error(w, "claude returned zero ideas", http.StatusBadGateway)
-		return
-	}
-
-	// Renumber IDs to avoid collisions with existing today's ideas. Find the
-	// highest counter currently in use for this persona+date, then bump from
-	// there.
-	maxCounter := m.maxIdeaCounter(persona, parsed.Date)
-	written := []fileIdea{}
-	for i := range parsed.Ideas {
-		fi := parsed.Ideas[i]
-		if fi.Persona == "" {
-			fi.Persona = persona
-		}
-		if fi.Date == "" {
-			fi.Date = parsed.Date
-		}
-		if fi.Date == "" {
-			fi.Date = today
-		}
-		maxCounter++
-		fi.ID = fmt.Sprintf("%s-%s-%02d", strings.ToLower(persona), fi.Date, maxCounter)
-		if err := m.appendNewIdea(fi); err != nil {
-			http.Error(w, fmt.Sprintf("append idea: %v", err), http.StatusInternalServerError)
-			return
-		}
-		written = append(written, fi)
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"persona":  persona,
-		"date":     parsed.Date,
-		"written":  len(written),
-		"ids":      ideaIDs(written),
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"persona":              persona,
+		"paperclip_issue_id":   issueID,
+		"status":               "dispatched",
+		"message":              fmt.Sprintf("Generation queued at Paperclip %s — refresh the inbox in 30-60s to see the new ideas", issueID),
 	})
-}
-
-func ideaIDs(fis []fileIdea) []string {
-	out := make([]string, len(fis))
-	for i, fi := range fis {
-		out[i] = fi.ID
-	}
-	return out
 }
 
 func (m *IdeasManager) appendNewIdea(fi fileIdea) error {

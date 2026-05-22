@@ -555,7 +555,16 @@ export default function IdeasPage({ onExit }) {
   const [counts, setCounts] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [busy, setBusy] = useState(false);
+  // busyIds is the set of idea IDs currently waiting on a backend action.
+  // Per-card busy lets the user fire revisions on multiple ideas in parallel
+  // (regen is 15-30 s, blocking the whole page on a single submission was the
+  // worst UX). Each card receives `busy={busyIds.has(idea.id)}` so only the
+  // in-flight card disables.
+  const [busyIds, setBusyIds] = useState(() => new Set());
+  // generateBusy is a separate global flag — the "+ Generate" button writes
+  // *new* ideas, so it's not card-scoped. We still want a single in-flight
+  // generation at a time per persona.
+  const [generateBusy, setGenerateBusy] = useState(false);
   const [filter, setFilter] = useState('pending');
   const [graph, setGraph] = useState({ nodes: [], edges: [] });
 
@@ -596,7 +605,14 @@ export default function IdeasPage({ onExit }) {
 
   const handleAction = useCallback(
     async (id, action, note) => {
-      setBusy(true);
+      // Mark just this idea as busy so the user can still act on every
+      // other card (regen + bridge can each take 15-30 s; blocking the
+      // whole page on a single submission was the worst UX).
+      setBusyIds((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
       try {
         const res = await fetch(`/api/ideas/${encodeURIComponent(id)}/action`, {
           method: 'POST',
@@ -610,7 +626,11 @@ export default function IdeasPage({ onExit }) {
         }
         await load();
       } finally {
-        setBusy(false);
+        setBusyIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
       }
     },
     [load]
@@ -618,11 +638,13 @@ export default function IdeasPage({ onExit }) {
 
   // Spawn a one-shot persona run to drop 3 new ideas into the inbox. Backed
   // by POST /api/ideas/generate — typical latency is 15-40s on Opus 4.7, so
-  // we set busy and refresh on completion.
+  // we set generateBusy and refresh on completion. Independent from
+  // per-card busy — you can still revise existing cards while a generation
+  // is in flight.
   const handleGenerate = useCallback(
     async (persona) => {
-      if (!confirm(`Generate 3 new ${persona} ideas? This shells out to claude (~30s, ~$0.30-1.00).`)) return;
-      setBusy(true);
+      if (!confirm(`Generate 3 new ${persona} ideas? This shells out to claude or ollama (~15-40s).`)) return;
+      setGenerateBusy(true);
       try {
         const res = await fetch('/api/ideas/generate', {
           method: 'POST',
@@ -636,7 +658,7 @@ export default function IdeasPage({ onExit }) {
         }
         await load();
       } finally {
-        setBusy(false);
+        setGenerateBusy(false);
       }
     },
     [load]
@@ -680,7 +702,7 @@ export default function IdeasPage({ onExit }) {
               <button
                 key={p}
                 type="button"
-                disabled={busy}
+                disabled={generateBusy}
                 onClick={(e) => {
                   e.currentTarget.closest('details')?.removeAttribute('open');
                   handleGenerate(p);
@@ -690,6 +712,11 @@ export default function IdeasPage({ onExit }) {
                 3 new from {p}
               </button>
             ))}
+            {generateBusy && (
+              <div className="border-t border-line px-3 py-1.5 text-[11px] text-zinc-400">
+                generating…
+              </div>
+            )}
           </div>
         </details>
         <button
@@ -766,7 +793,7 @@ export default function IdeasPage({ onExit }) {
             )}
             <div className="space-y-3">
               {filteredIdeas.map((idea) => (
-                <IdeaCard key={idea.id} idea={idea} busy={busy} onAction={handleAction} />
+                <IdeaCard key={idea.id} idea={idea} busy={busyIds.has(idea.id)} onAction={handleAction} />
               ))}
             </div>
           </>
