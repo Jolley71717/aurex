@@ -433,53 +433,78 @@ export default function Terminal({ onReady, onInput, onResize }) {
         // term.focus() alone can fail to open the soft keyboard because the
         // browser requires the focus to land on a real input element from a
         // user gesture — direct .focus() on the textarea reliably triggers it.
+        // armNode / disarmNode toggle the inputmode/readonly attributes on a
+        // single element imperatively. We need these to fire INSIDE the user-
+        // gesture event handler (a click on the ⌨️ button), not on the next
+        // React render — iOS only honours a focus() call as a "show keyboard"
+        // request when the input is editable at the moment the call happens,
+        // AND the call is still within the active user gesture. A scheduled
+        // setState + RAF would miss both windows.
+        const armNode = (n) => {
+          if (!n) return;
+          try {
+            n.removeAttribute('readonly');
+            n.setAttribute('inputmode', 'text');
+          } catch {}
+        };
+        const disarmNode = (n) => {
+          if (!n) return;
+          try {
+            n.setAttribute('readonly', '');
+            n.setAttribute('inputmode', 'none');
+          } catch {}
+        };
+        // Apply initial disarmed state to ghostty's own textarea — the JSX
+        // already does this for our mirror via inputMode/readOnly props.
+        // ghostty creates its textarea inside its own host, so we have to do
+        // it imperatively. Without this, iOS focuses ghostty's textarea on
+        // touchstart (during a scroll, even) and pops the keyboard.
+        const ghosttyTextarea = term.textarea
+          || containerRef.current?.querySelector('textarea');
+        disarmNode(ghosttyTextarea);
+
         const focusTerm = () => {
-          // Desktop: focus ghostty's textarea (or fall through to term.focus)
-          // — there's no soft keyboard to gate, and ghostty's keydown handler
-          // is what processes typing.
           if (!mirrorRef.current) {
+            // Desktop: no mirror, focus ghostty's textarea (or term).
             const ta = term.textarea;
             if (ta && typeof ta.focus === 'function') ta.focus();
             else term.focus();
             return;
           }
-          // Touch path: "arm" the keyboard (flips inputMode → "text" and
-          // clears readOnly), THEN focus on the next frame after React has
-          // re-rendered. Doing it synchronously would call .focus() on a
-          // mirror that's still readOnly + inputMode=none, and iOS would
-          // refuse to show the soft keyboard.
+          // Touch path. Order matters and EVERYTHING must run synchronously
+          // inside the click handler so iOS counts the focus() as part of
+          // the active user gesture.
+          //
+          // 1. Imperatively clear inputmode=none / readonly so the element is
+          //    editable at the moment of focus(). React's JSX-controlled
+          //    attributes catch up on the next render — same values, no flicker.
+          // 2. Focus the mirror — iOS shows the keyboard.
+          // 3. Update React state so other render paths (toolbar gating, etc)
+          //    see the armed flag.
+          armNode(mirrorRef.current);
+          armNode(term.textarea);
+          try { mirrorRef.current.focus({ preventScroll: true }); } catch {
+            try { mirrorRef.current.focus(); } catch {}
+          }
           keyboardArmedRef.current = true;
           setKeyboardArmed(true);
-          requestAnimationFrame(() => {
-            try { mirrorRef.current?.focus({ preventScroll: true }); } catch {
-              try { mirrorRef.current?.focus(); } catch {}
-            }
-          });
         };
         const blurTerm = () => {
-          // Disarm first so even if iOS re-focuses the mirror after our
-          // blur() (e.g. on the next touchstart), inputMode=none keeps the
-          // soft keyboard down. Then blur every node iOS might be holding
-          // focus on — the mirror, ghostty's own textarea, and the host
-          // element ghostty makes contenteditable.
+          // Mirror order: disarm FIRST so the keyboard goes down immediately
+          // (an editable input loses keyboard on attribute change), then
+          // blur every node iOS might be holding focus on.
           keyboardArmedRef.current = false;
           setKeyboardArmed(false);
+          disarmNode(mirrorRef.current);
+          disarmNode(term.textarea);
           try { mirrorRef.current?.blur(); } catch {}
-          const ta = term.textarea;
-          try { if (ta && typeof ta.blur === 'function') ta.blur(); } catch {}
+          try { if (term.textarea && typeof term.textarea.blur === 'function') term.textarea.blur(); } catch {}
           try {
             const host = containerRef.current;
             if (host && typeof host.blur === 'function') host.blur();
           } catch {}
         };
-        const isKeyboardOpen = () => {
-          // Track our explicit "armed" flag rather than document.activeElement
-          // — iOS will sometimes restore focus to the mirror on its own
-          // (during a scroll, for instance), and we don't want that to count
-          // as "keyboard open" because inputMode=none keeps the keyboard
-          // hidden in that case.
-          return keyboardArmedRef.current;
-        };
+        const isKeyboardOpen = () => keyboardArmedRef.current;
         // Initial focus: desktop wants the terminal hot for typing immediately,
         // but on touch the soft keyboard should NOT pop up just because the
         // session loaded — wait for the user to explicitly tap the toolbar
