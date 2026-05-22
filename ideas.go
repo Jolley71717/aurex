@@ -609,6 +609,61 @@ func paperclipFetchIssueComments(issueIdentifier string) ([]string, error) {
 	return nil, fmt.Errorf("paperclip comments response had unexpected shape")
 }
 
+// repairJSONControlChars escapes raw newlines, carriage returns, and tabs
+// that appear inside JSON string literals — LLM output sometimes contains
+// them unescaped, which makes strict json.Unmarshal refuse the whole blob.
+// We walk char-by-char tracking string-literal context (and backslash
+// escapes) so we don't touch the structural whitespace between tokens.
+func repairJSONControlChars(s string) string {
+	var out strings.Builder
+	out.Grow(len(s) + 32)
+	inString := false
+	escaped := false
+	for _, r := range s {
+		if escaped {
+			out.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if inString && r == '\\' {
+			out.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			inString = !inString
+			out.WriteRune(r)
+			continue
+		}
+		if inString {
+			switch r {
+			case '\n':
+				out.WriteString(`\n`)
+			case '\r':
+				out.WriteString(`\r`)
+			case '\t':
+				out.WriteString(`\t`)
+			default:
+				out.WriteRune(r)
+			}
+		} else {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+// tryParseJSON attempts strict json.Unmarshal first, then on failure repairs
+// raw control chars inside string literals and tries again. Returns the
+// parsed value via the caller's destination pointer.
+func tryParseJSON(data []byte, dst any) error {
+	if err := json.Unmarshal(data, dst); err == nil {
+		return nil
+	}
+	repaired := repairJSONControlChars(string(data))
+	return json.Unmarshal([]byte(repaired), dst)
+}
+
 // extractJSONBlock pulls a fenced ```json block out of a markdown comment.
 // Falls back to scanning for the first top-level JSON object if no fence is
 // present. Returns the raw JSON string (no fences) or an error.
@@ -719,7 +774,7 @@ func (m *IdeasManager) StartPaperclipPoller(ctx context.Context, interval time.D
 // must hold m.mu.
 func (m *IdeasManager) applyRevisionResultLocked(d *paperclipDispatch, jsonStr string) error {
 	var fi fileIdea
-	if err := json.Unmarshal([]byte(jsonStr), &fi); err != nil {
+	if err := tryParseJSON([]byte(jsonStr), &fi); err != nil {
 		return fmt.Errorf("parse revision JSON: %w", err)
 	}
 	if fi.ID != "" && fi.ID != d.IdeaID {
@@ -766,7 +821,7 @@ func (m *IdeasManager) applyGenerationResultLocked(d *paperclipDispatch, jsonStr
 		Date    string     `json:"date"`
 		Ideas   []fileIdea `json:"ideas"`
 	}
-	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+	if err := tryParseJSON([]byte(jsonStr), &parsed); err != nil {
 		return fmt.Errorf("parse generation JSON: %w", err)
 	}
 	if len(parsed.Ideas) == 0 {
