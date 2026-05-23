@@ -482,11 +482,29 @@ export default function Terminal({ onReady, onInput, onResize }) {
           if (atBottom !== followRef.current) setFollow(atBottom);
         };
         const onTouchEnd = () => {
-          // Tap and drag end the same way: just reset accumulators. The soft
-          // keyboard is opened/closed explicitly via the toolbar's keyboard
-          // toggle button — tapping the terminal area is never a reason to
-          // pop the keyboard up. Users found the auto-focus disruptive when
-          // they were just reading scrollback or following an agent's stream.
+          // A clean tap (no significant finger travel) arms the keyboard so
+          // users don't have to hunt for the toolbar's ⌨️ button. Any
+          // scroll / flick registers far more than 8 px of accumulated
+          // movement and is excluded. Only acts when the keyboard is
+          // currently down — reopening on every tap-while-typing would be
+          // disruptive (the original reason auto-focus was removed).
+          if (
+            touchStartY !== null &&
+            touchMovedTotal < 8 &&
+            !keyboardArmedRef.current &&
+            mirrorRef.current
+          ) {
+            // Must run synchronously inside the touchend handler so iOS
+            // attributes the focus() call to the active user gesture.
+            try {
+              armMirror(mirrorRef.current);
+              armMirror(term.textarea);
+              armHost(containerRef.current);
+              mirrorRef.current.focus({ preventScroll: true });
+              keyboardArmedRef.current = true;
+              setKeyboardArmed(true);
+            } catch {}
+          }
           touchStartY = null;
           touchStartX = null;
           touchAccum = 0;

@@ -48,11 +48,16 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed, onToggleKeybo
   };
 
   const handleKeyboardToggle = () => {
+    // Call the parent FIRST, before any state mutation, so the chain to the
+    // mirror's focus() stays inside iOS's "trusted user gesture" window —
+    // setPressed (and its setTimeout) would otherwise enqueue React work
+    // that can split the synchronous attribution and silently no-op the
+    // keyboard pop.
+    onToggleKeyboard?.();
     // Briefly flash the button so the user knows the tap registered, even
     // when the keyboard takes a moment to animate in/out.
     setPressed('KBD');
     setTimeout(() => setPressed(null), 80);
-    onToggleKeyboard?.();
   };
 
   const noFocusSteal = (e) => e.preventDefault();
