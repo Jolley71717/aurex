@@ -146,20 +146,30 @@ export default function Terminal({ onReady, onInput, onResize }) {
       lastSentRef.current = '';
       return;
     }
-    // Backspace: always send a delete to the server, regardless of whether
-    // our local textarea has any characters. This handles the common case
-    // where the server's input prompt (e.g. Claude Code's input box) already
-    // has text from before this client mounted — the user wants to delete
-    // those characters but our mirror is empty, so the default action would
-    // be a no-op. We preventDefault and do our own delete so the default
-    // doesn't double-fire (which would cause two backspaces).
+    // Backspace handling has two cases:
+    //
+    //  1. Mirror is empty but the server's prompt has text the user didn't
+    //     type locally (e.g. they reconnected to a session with text in
+    //     Claude Code's input). We must synthesize a \x7f because the
+    //     default action would no-op against an empty textarea.
+    //
+    //  2. Mirror has content. We MUST let the default delete fire — iOS's
+    //     press-and-hold auto-repeat only kicks in when it sees the
+    //     default action complete on the first keystroke. If we
+    //     preventDefault, iOS treats the key as consumed-but-ignored and
+    //     never starts repeating. After the default removes the char, the
+    //     onInput handler diffs ta.value against lastSentRef and sends
+    //     exactly one \x7f per removed char — so press-and-hold sends a
+    //     stream of \x7f for as long as the user holds.
     if (e.key === 'Backspace' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      onInputRef.current?.('\x7f');
       const ta = mirrorRef.current;
       if (ta && ta.value.length > 0) {
-        ta.value = ta.value.slice(0, -1);
+        // Case 2 — let default + onInput diff do the work.
+        return;
       }
+      // Case 1 — synthesize the delete against the server-side buffer.
+      e.preventDefault();
+      onInputRef.current?.('\x7f');
       if (lastSentRef.current.length > 0) {
         lastSentRef.current = lastSentRef.current.slice(0, -1);
       }
