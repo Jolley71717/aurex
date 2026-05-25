@@ -114,6 +114,12 @@ func (s *Server) Routes() http.Handler {
 		if s.agents != nil {
 			s.agents.RegisterRoutes(r)
 		}
+		// Paperclip persona surface — list the 10 named agents and wake any
+		// one of them on demand. No prerequisite manager; relies on the
+		// /tmp/pcp-token file + env-configurable Paperclip URL. Always
+		// registered; the handlers themselves emit 503 if the token is
+		// missing.
+		RegisterPaperclipAgentRoutes(r)
 	})
 
 	// Hook endpoint is intentionally NOT behind auth — it gates on localhost instead.

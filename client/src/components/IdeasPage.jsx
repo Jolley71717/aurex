@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AgentsPanel from './AgentsPanel';
+import PaperclipFleetPanel from './PaperclipFleetPanel';
 
 // PERSONA_TONE drives the badge color + accent ring per persona, matching
 // the brief in the prompt. We use Tailwind utility classes so the build
@@ -735,6 +736,7 @@ export default function IdeasPage({ onExit }) {
           { k: 'inbox', l: 'Inbox' },
           { k: 'connections', l: 'Connections' },
           { k: 'personas', l: 'Personas' },
+          { k: 'fleet', l: 'Fleet' },
           { k: 'agents', l: 'Agents' },
           { k: 'gascity', l: 'Gas City' },
         ].map((t) => (
@@ -814,6 +816,7 @@ export default function IdeasPage({ onExit }) {
           />
         )}
         {tab === 'personas' && <PersonaPromptEditor />}
+        {tab === 'fleet' && <PaperclipFleetPanel />}
         {tab === 'agents' && <AgentsPanel />}
         {tab === 'gascity' && (
           <div className="h-full -mx-3 -my-3">
