@@ -24,14 +24,26 @@ function ctrlOf(ch) {
  * Mobile toolbar. Buttons use tabIndex=-1 plus preventDefault on
  * mousedown/touchstart so they can never steal focus from xterm's hidden
  * textarea — the soft keyboard stays up across taps.
+ *
+ * The rightmost button is a keyboard toggle (⌨) that explicitly opens or
+ * dismisses the soft keyboard. Tapping the terminal area no longer auto-
+ * focuses the mirror, so the toggle is the user's only path to typing.
  */
-export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed }) {
+export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed, onToggleKeyboard }) {
   const [pressed, setPressed] = useState(null);
 
   const handleTap = (k) => {
     setPressed(k.label);
     setTimeout(() => setPressed(null), 80);
     onSendKey(k.seq);
+  };
+
+  const handleKeyboardToggle = () => {
+    // Briefly flash the button so the user knows the tap registered, even
+    // when the keyboard takes a moment to animate in/out.
+    setPressed('KBD');
+    setTimeout(() => setPressed(null), 80);
+    onToggleKeyboard?.();
   };
 
   const noFocusSteal = (e) => e.preventDefault();
@@ -72,6 +84,24 @@ export default function Toolbar({ onSendKey, onCtrlArm, ctrlArmed }) {
           {k.label}
         </button>
       ))}
+      {onToggleKeyboard && (
+        <button
+          tabIndex={-1}
+          onMouseDown={noFocusSteal}
+          onTouchStart={noFocusSteal}
+          onClick={handleKeyboardToggle}
+          aria-label="Show or hide keyboard"
+          title="Show / hide keyboard"
+          className={[
+            'shrink-0 rounded-md border px-3 py-2 text-xs font-mono',
+            pressed === 'KBD'
+              ? 'border-aura bg-aura/15 text-aura'
+              : 'border-line bg-bg text-zinc-200 active:bg-zinc-800',
+          ].join(' ')}
+        >
+          ⌨️
+        </button>
+      )}
     </div>
   );
 }

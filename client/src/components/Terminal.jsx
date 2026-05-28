@@ -73,6 +73,17 @@ export default function Terminal({ onReady, onInput, onResize }) {
   const mirrorRef = useRef(null);
   const lastSentRef = useRef('');
   const [isTouch, setIsTouch] = useState(false);
+  // Soft-keyboard "armed" flag. When false, the mirror renders with
+  // inputMode="none" and readOnly, so iOS / Android refuse to show the soft
+  // keyboard even if focus is restored to the mirror by an OS-level auto-
+  // focus heuristic (e.g. focus restoration on touchstart during a scroll
+  // gesture). The toggle button on the toolbar drives this state by calling
+  // the imperative focus()/blur() methods on the handle.
+  const [keyboardArmed, setKeyboardArmed] = useState(false);
+  // Ref mirror so isKeyboardOpen() can return synchronously without React
+  // having to re-render first.
+  const keyboardArmedRef = useRef(false);
+  useEffect(() => { keyboardArmedRef.current = keyboardArmed; }, [keyboardArmed]);
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const touch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
@@ -414,18 +425,15 @@ export default function Terminal({ onReady, onInput, onResize }) {
           if (atBottom !== followRef.current) setFollow(atBottom);
         };
         const onTouchEnd = () => {
-          // Tap (small total movement) → focus the mobile input mirror so the
-          // soft keyboard opens. Drags (scrolling) leave focus alone.
-          const wasTap = touchMovedTotal < 8;
+          // Tap and drag end the same way: just reset accumulators. The soft
+          // keyboard is opened/closed explicitly via the toolbar's keyboard
+          // toggle button — tapping the terminal area is never a reason to
+          // pop the keyboard up. Users found the auto-focus disruptive when
+          // they were just reading scrollback or following an agent's stream.
           touchStartY = null;
           touchStartX = null;
           touchAccum = 0;
           touchMovedTotal = 0;
-          if (wasTap && mirrorRef.current) {
-            try { mirrorRef.current.focus({ preventScroll: true }); } catch {
-              mirrorRef.current.focus();
-            }
-          }
         };
         containerRef.current.addEventListener('touchstart', onTouchStart, { passive: true });
         // touchmove must be non-passive so onTouchMove can call preventDefault
@@ -444,23 +452,85 @@ export default function Terminal({ onReady, onInput, onResize }) {
         // term.focus() alone can fail to open the soft keyboard because the
         // browser requires the focus to land on a real input element from a
         // user gesture — direct .focus() on the textarea reliably triggers it.
+        // armNode / disarmNode toggle the inputmode/readonly attributes on a
+        // single element imperatively. We need these to fire INSIDE the user-
+        // gesture event handler (a click on the ⌨️ button), not on the next
+        // React render — iOS only honours a focus() call as a "show keyboard"
+        // request when the input is editable at the moment the call happens,
+        // AND the call is still within the active user gesture. A scheduled
+        // setState + RAF would miss both windows.
+        const armNode = (n) => {
+          if (!n) return;
+          try {
+            n.removeAttribute('readonly');
+            n.setAttribute('inputmode', 'text');
+          } catch {}
+        };
+        const disarmNode = (n) => {
+          if (!n) return;
+          try {
+            n.setAttribute('readonly', '');
+            n.setAttribute('inputmode', 'none');
+          } catch {}
+        };
+        // Apply initial disarmed state to ghostty's own textarea — the JSX
+        // already does this for our mirror via inputMode/readOnly props.
+        // ghostty creates its textarea inside its own host, so we have to do
+        // it imperatively. Without this, iOS focuses ghostty's textarea on
+        // touchstart (during a scroll, even) and pops the keyboard.
+        const ghosttyTextarea = term.textarea
+          || containerRef.current?.querySelector('textarea');
+        disarmNode(ghosttyTextarea);
+
         const focusTerm = () => {
-          // On touch devices, focus our mobile input mirror — that's where all
-          // typing should land. On desktop, fall through to ghostty's native
-          // focus (its keydown handler is what processes typing there).
-          if (mirrorRef.current) {
-            try { mirrorRef.current.focus({ preventScroll: true }); return; } catch {}
-            mirrorRef.current.focus();
+          if (!mirrorRef.current) {
+            // Desktop: no mirror, focus ghostty's textarea (or term).
+            const ta = term.textarea;
+            if (ta && typeof ta.focus === 'function') ta.focus();
+            else term.focus();
             return;
           }
-          const ta = term.textarea;
-          if (ta && typeof ta.focus === 'function') {
-            ta.focus();
-          } else {
-            term.focus();
+          // Touch path. Order matters and EVERYTHING must run synchronously
+          // inside the click handler so iOS counts the focus() as part of
+          // the active user gesture.
+          //
+          // 1. Imperatively clear inputmode=none / readonly so the element is
+          //    editable at the moment of focus(). React's JSX-controlled
+          //    attributes catch up on the next render — same values, no flicker.
+          // 2. Focus the mirror — iOS shows the keyboard.
+          // 3. Update React state so other render paths (toolbar gating, etc)
+          //    see the armed flag.
+          armNode(mirrorRef.current);
+          armNode(term.textarea);
+          try { mirrorRef.current.focus({ preventScroll: true }); } catch {
+            try { mirrorRef.current.focus(); } catch {}
           }
+          keyboardArmedRef.current = true;
+          setKeyboardArmed(true);
         };
-        focusTerm();
+        const blurTerm = () => {
+          // Mirror order: disarm FIRST so the keyboard goes down immediately
+          // (an editable input loses keyboard on attribute change), then
+          // blur every node iOS might be holding focus on.
+          keyboardArmedRef.current = false;
+          setKeyboardArmed(false);
+          disarmNode(mirrorRef.current);
+          disarmNode(term.textarea);
+          try { mirrorRef.current?.blur(); } catch {}
+          try { if (term.textarea && typeof term.textarea.blur === 'function') term.textarea.blur(); } catch {}
+          try {
+            const host = containerRef.current;
+            if (host && typeof host.blur === 'function') host.blur();
+          } catch {}
+        };
+        const isKeyboardOpen = () => keyboardArmedRef.current;
+        // Initial focus: desktop wants the terminal hot for typing immediately,
+        // but on touch the soft keyboard should NOT pop up just because the
+        // session loaded — wait for the user to explicitly tap the toolbar
+        // keyboard button.
+        if (!mirrorRef.current) {
+          focusTerm();
+        }
 
         const jumpToBottom = () => {
           try { term.scrollToBottom(); } catch {}
@@ -470,6 +540,8 @@ export default function Terminal({ onReady, onInput, onResize }) {
         onReady?.({
           write: writeAndPreserveScroll,
           focus: focusTerm,
+          blur: blurTerm,
+          isKeyboardOpen,
           sendKey: (s) => onInputRef.current?.(s),
           fit: handleResize,
           refit: refitNow,
@@ -535,6 +607,13 @@ export default function Terminal({ onReady, onInput, onResize }) {
           autoCorrect="on"
           spellCheck={true}
           aria-label="Terminal input"
+          // inputMode + readOnly are the levers that keep the soft keyboard
+          // down when the user hasn't tapped the ⌨️ toggle. Both iOS and
+          // Android refuse to render the soft keyboard for an input with
+          // inputmode="none"; readOnly is the belt-and-suspenders fallback
+          // for browsers that don't honor inputmode on a textarea.
+          inputMode={keyboardArmed ? 'text' : 'none'}
+          readOnly={!keyboardArmed}
           className="absolute inset-0 z-10 resize-none border-0 bg-transparent p-0 outline-none"
           style={{
             color: 'transparent',
