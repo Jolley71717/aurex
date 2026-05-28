@@ -380,6 +380,13 @@ export default function Terminal({ onReady, onInput, onResize }) {
         };
         const onTouchMove = (e) => {
           if (touchStartY === null || e.touches.length !== 1) return;
+          // Claim the gesture so iOS Safari can't interpret a vertical drag
+          // as a page-scroll once ghostty's scrollback hits its edge. Without
+          // this, dragging down past the bottom of the buffer let iOS pan
+          // the document, leaving a black gap between the toolbar and the
+          // mobile input bar. preventDefault requires the listener to be
+          // non-passive — set below where we register it.
+          if (e.cancelable) e.preventDefault();
           const y = e.touches[0].clientY;
           const x = e.touches[0].clientX;
           touchMovedTotal += Math.abs(y - touchStartY) + Math.abs(x - (touchStartX ?? x));
@@ -411,7 +418,9 @@ export default function Terminal({ onReady, onInput, onResize }) {
           }
         };
         containerRef.current.addEventListener('touchstart', onTouchStart, { passive: true });
-        containerRef.current.addEventListener('touchmove', onTouchMove, { passive: true });
+        // touchmove must be non-passive so onTouchMove can call preventDefault
+        // and claim the gesture (see comment in the handler).
+        containerRef.current.addEventListener('touchmove', onTouchMove, { passive: false });
         containerRef.current.addEventListener('touchend', onTouchEnd);
         containerRef.current.addEventListener('touchcancel', onTouchEnd);
         cleanups.push(() => {

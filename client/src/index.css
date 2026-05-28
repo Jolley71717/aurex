@@ -5,6 +5,12 @@
 html, body, #root {
   height: 100%;
   margin: 0;
+  /* Lock the document so iOS Safari can never scroll it. The terminal is the
+   * page on mobile — any vertical drag inside the terminal area is handled by
+   * Terminal.jsx's touchmove listener, which calls term.scrollLines() directly.
+   * Without overflow:hidden here, dragging past the scrollback edge let iOS
+   * scroll the document body, dragging the toolbar + keyboard along with it. */
+  overflow: hidden;
   overscroll-behavior: none;
 }
 
