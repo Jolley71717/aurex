@@ -292,7 +292,10 @@ export default function App() {
               onInput={handleTermInput}
               onResize={handleResize}
             />
-            {/* Mobile-only toolbar — desktop keyboards already have these keys. */}
+            {/* Mobile-only toolbar — desktop's Cmd+V hits Terminal.jsx's
+                paste-event handler directly (which handles both text and
+                image clipboards), so desktop doesn't need the on-screen
+                button. */}
             <div className="md:hidden">
               <Toolbar
                 onSendKey={handleToolbarKey}

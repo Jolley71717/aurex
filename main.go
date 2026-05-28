@@ -46,6 +46,7 @@ func main() {
 	stop := make(chan struct{})
 	go store.PollMetadata(3*time.Second, stop)
 	go store.PollIdle(stop)
+	go startPasteJanitor(cfg.PasteDir, time.Duration(cfg.PasteMaxAgeHours)*time.Hour, stop)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	httpServer := &http.Server{

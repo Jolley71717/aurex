@@ -344,6 +344,65 @@ export default function Terminal({ onReady, onInput, onResize }) {
           cleanups.push(() => host.removeEventListener('focusin', onHostFocusIn));
         }
 
+        // Image-paste fast path. The browser's paste event runs BEFORE
+        // beforeinput and exposes clipboardData.items with their MIME types,
+        // so we can intercept image clipboards (Cmd+V on a screenshot) and
+        // route them through /api/paste/image — matches the Toolbar PASTE
+        // button's flow, just keyboard-triggered. Plain-text Cmd+V is left
+        // alone so the existing insertFromPaste handler above keeps owning it.
+        const onPaste = (e) => {
+          const items = e.clipboardData && e.clipboardData.items;
+          if (!items || items.length === 0) return;
+          let imgItem = null;
+          for (const it of items) {
+            if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+              imgItem = it;
+              break;
+            }
+          }
+          if (!imgItem) return; // not an image — let the normal text path handle it
+          e.preventDefault();
+          e.stopPropagation();
+          const blob = imgItem.getAsFile();
+          if (!blob) return;
+          fetch('/api/paste/image', {
+            method: 'POST',
+            headers: { 'Content-Type': blob.type || 'image/png' },
+            body: blob,
+            credentials: 'include',
+          })
+            .then((res) => (res.ok ? res.json() : Promise.reject(new Error('upload ' + res.status))))
+            .then((data) => {
+              if (data && data.path) {
+                onInputRef.current?.(data.path + ' ');
+              }
+            })
+            .catch((err) => {
+              console.error('aurex: image paste upload failed', err);
+            });
+        };
+        host.addEventListener('paste', onPaste, true);
+        cleanups.push(() => host.removeEventListener('paste', onPaste, true));
+
+        // Intercept Cmd+V / Ctrl+V before ghostty's keymap sees them.
+        // ghostty-web 0.4 binds Meta+V (and Ctrl+V) to an internal action
+        // that emits a stray character ("o" in practice on macOS) — we need
+        // its keydown handler to never run for the paste shortcut. We
+        // stopImmediatePropagation (so ghostty's bubble-phase listener
+        // doesn't fire) but do NOT preventDefault, so the browser still
+        // dispatches its native 'paste' event for our handler above to
+        // route (text → beforeinput insertFromPaste, image → /api/paste/image).
+        const onKeyDownCapPaste = (e) => {
+          if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+            const key = (e.key || '').toLowerCase();
+            if (key === 'v') {
+              e.stopImmediatePropagation();
+            }
+          }
+        };
+        host.addEventListener('keydown', onKeyDownCapPaste, true);
+        cleanups.push(() => host.removeEventListener('keydown', onKeyDownCapPaste, true));
+
         // Debounced fit — many resize bursts (orientation, keyboard, sidebar)
         // collapse to one PTY resize call. We always emit our current size via
         // onResize after fit, even if ghostty thinks the size didn't change —
