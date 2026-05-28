@@ -4,6 +4,7 @@ import Terminal from './components/Terminal.jsx';
 import Toolbar, { ctrlOf } from './components/Toolbar.jsx';
 import PushPanel from './components/PushPanel.jsx';
 import IdeasPage from './components/IdeasPage.jsx';
+import SettingsPage from './components/SettingsPage.jsx';
 import TranscriptPanel from './components/TranscriptPanel.jsx';
 import { useSession } from './hooks/useSession.js';
 import { usePush } from './hooks/usePush.js';
@@ -265,6 +266,10 @@ export default function App() {
     );
   }
 
+  if (surface === 'settings') {
+    return <SettingsPage onExit={() => navigate('terminal')} />;
+  }
+
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-zinc-100">
       <Sidebar
@@ -280,6 +285,7 @@ export default function App() {
         onOpenPush={() => setPushPanelOpen(true)}
         onOpenIdeas={() => navigate('ideas')}
         onOpenBeads={() => navigate('beads')}
+        onOpenSettings={() => navigate('settings')}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />

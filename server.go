@@ -26,27 +26,29 @@ import (
 )
 
 type Server struct {
-	cfg      *Config
-	store    *SessionStore
-	push     *PushManager
-	ideas    *IdeasManager
-	beads    *BeadsManager
-	agents   *AgentsManager
-	gc       *gcProxy
-	frontend fs.FS // embedded React build (may be nil if not embedded yet)
-	upgrader websocket.Upgrader
+	cfg        *Config
+	store      *SessionStore
+	push       *PushManager
+	ideas      *IdeasManager
+	beads      *BeadsManager
+	agents     *AgentsManager
+	gc         *gcProxy
+	connectors *ConnectorsManager
+	frontend   fs.FS // embedded React build (may be nil if not embedded yet)
+	upgrader   websocket.Upgrader
 }
 
-func NewServer(cfg *Config, store *SessionStore, push *PushManager, ideas *IdeasManager, beads *BeadsManager, agents *AgentsManager, gc *gcProxy, frontend fs.FS) *Server {
+func NewServer(cfg *Config, store *SessionStore, push *PushManager, ideas *IdeasManager, beads *BeadsManager, agents *AgentsManager, gc *gcProxy, connectors *ConnectorsManager, frontend fs.FS) *Server {
 	s := &Server{
-		cfg:      cfg,
-		store:    store,
-		push:     push,
-		ideas:    ideas,
-		beads:    beads,
-		agents:   agents,
-		gc:       gc,
-		frontend: frontend,
+		cfg:        cfg,
+		store:      store,
+		push:       push,
+		ideas:      ideas,
+		beads:      beads,
+		agents:     agents,
+		gc:         gc,
+		connectors: connectors,
+		frontend:   frontend,
 	}
 	s.upgrader = websocket.Upgrader{
 		ReadBufferSize:  4096,
@@ -113,6 +115,9 @@ func (s *Server) Routes() http.Handler {
 		}
 		if s.agents != nil {
 			s.agents.RegisterRoutes(r)
+		}
+		if s.connectors != nil {
+			s.connectors.RegisterRoutes(r)
 		}
 		// Paperclip persona surface — list the 10 named agents and wake any
 		// one of them on demand. No prerequisite manager; relies on the

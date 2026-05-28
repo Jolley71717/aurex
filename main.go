@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -85,7 +86,21 @@ func main() {
 	// is unreachable the corresponding mount stays disabled until restart.
 	gc := newGcProxy(cfg.GcDashboardURL, cfg.GcSupervisorURL)
 
-	server := NewServer(cfg, store, push, ideas, beads, agents, gc, Frontend())
+	// Connectors registry — typed external-integration list rendered by the
+	// Settings page. Defaults are seeded from the existing config so users
+	// see Paperclip / Beads / Gas City pre-populated after upgrade. Health
+	// is refreshed every 60s in the background.
+	connectorsPath := filepath.Join(filepath.Dir(cfg.PushSubscriptionsFile), "aurex.connectors.json")
+	connectors, err := NewConnectorsManager(connectorsPath, DefaultConnectorsFromConfig(cfg))
+	if err != nil {
+		log.Printf("aurex: connectors: %v (surface disabled)", err)
+		connectors = nil
+	} else {
+		log.Printf("aurex: connectors surface enabled at %s (%d registered)", connectorsPath, len(connectors.List()))
+		connectors.StartRefreshLoop(context.Background(), 60*time.Second)
+	}
+
+	server := NewServer(cfg, store, push, ideas, beads, agents, gc, connectors, Frontend())
 	store.SetOnUpdate(server.BroadcastSessionUpdate)
 
 	stop := make(chan struct{})
