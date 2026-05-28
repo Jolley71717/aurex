@@ -524,6 +524,27 @@ export default function Terminal({ onReady, onInput, onResize }) {
           containerRef.current?.removeEventListener('touchend', onTouchEnd);
           containerRef.current?.removeEventListener('touchcancel', onTouchEnd);
         });
+        // The hidden mirror textarea sits at `absolute inset-0 z-10` with
+        // pointer-events:auto whenever the soft keyboard is armed — iOS
+        // requires that to keep the keyboard up. The side-effect is that
+        // touchmove on the mirror never reaches the container handler above,
+        // so users can't scroll terminal history while the keyboard is open.
+        // Bridge the gesture: bind the SAME handlers on the mirror so a drag
+        // on the (transparent) mirror surface still drives term.scrollLines.
+        // The handlers are state-free across the two surfaces because the
+        // touchStart/Move/End closures share the touchStartY etc. accumulators.
+        if (mirrorRef.current) {
+          mirrorRef.current.addEventListener('touchstart', onTouchStart, { passive: true });
+          mirrorRef.current.addEventListener('touchmove', onTouchMove, { passive: false });
+          mirrorRef.current.addEventListener('touchend', onTouchEnd);
+          mirrorRef.current.addEventListener('touchcancel', onTouchEnd);
+          cleanups.push(() => {
+            mirrorRef.current?.removeEventListener('touchstart', onTouchStart);
+            mirrorRef.current?.removeEventListener('touchmove', onTouchMove);
+            mirrorRef.current?.removeEventListener('touchend', onTouchEnd);
+            mirrorRef.current?.removeEventListener('touchcancel', onTouchEnd);
+          });
+        }
 
         // Focus the actual textarea ghostty places inside the host. On mobile,
         // term.focus() alone can fail to open the soft keyboard because the
