@@ -73,6 +73,15 @@ export default function Terminal({ onReady, onInput, onResize }) {
   const mirrorRef = useRef(null);
   const lastSentRef = useRef('');
   const [isTouch, setIsTouch] = useState(false);
+  // Touch-scroll accumulator state lifted to refs so both the container and
+  // the mirror (when armed) can drive term.scrollLines from a shared bucket.
+  // Refs survive Terminal re-mounts (component instance) and React renders
+  // without re-binding listeners. The handlers themselves read term out of
+  // termRef.current so they're robust against ghostty init ordering.
+  const touchStartYRef = useRef(null);
+  const touchStartXRef = useRef(null);
+  const touchAccumRef = useRef(0);
+  const touchMovedTotalRef = useRef(0);
   // Soft-keyboard "armed" flag. When false, the mirror renders with
   // inputMode="none" and readOnly, so iOS / Android refuse to show the soft
   // keyboard even if focus is restored to the mirror by an OS-level auto-
@@ -89,6 +98,44 @@ export default function Terminal({ onReady, onInput, onResize }) {
     const touch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
     setIsTouch(touch);
   }, []);
+
+  // Bind the touch handlers to the hidden mirror textarea once it's in the
+  // DOM. Separate from the ghostty-init effect because:
+  //   * Ghostty.load() is cached as a module-level singleton; on Terminal
+  //     remount (e.g., user navigates Ideas → terminal → Ideas → terminal)
+  //     it resolves in a microtask BEFORE React commits the isTouch state
+  //     update on the new mount. So binding inside .then() would see
+  //     mirrorRef.current === null and skip the binding silently.
+  //   * The mirror is rendered conditionally on isTouch. By keying this
+  //     effect on isTouch + the keyboard-armed state we re-bind whenever
+  //     either changes, and the mirror is guaranteed to be in the DOM by
+  //     the time React invokes the effect callback.
+  //
+  // The mirror only intercepts touchmove when it has `pointer-events: auto`
+  // (i.e., keyboard armed). When the keyboard is down, touchmove on the
+  // canvas hits the container's listeners instead — both surfaces drive
+  // the same accumulator refs so there's no double-fire.
+  useEffect(() => {
+    if (!isTouch) return undefined;
+    const mirror = mirrorRef.current;
+    const handlers = termRef.current?.__touchHandlers;
+    if (!mirror || !handlers) return undefined;
+    const { onTouchStart, onTouchMove, onTouchEnd } = handlers;
+    mirror.addEventListener('touchstart', onTouchStart, { passive: true });
+    mirror.addEventListener('touchmove', onTouchMove, { passive: false });
+    mirror.addEventListener('touchend', onTouchEnd);
+    mirror.addEventListener('touchcancel', onTouchEnd);
+    return () => {
+      mirror.removeEventListener('touchstart', onTouchStart);
+      mirror.removeEventListener('touchmove', onTouchMove);
+      mirror.removeEventListener('touchend', onTouchEnd);
+      mirror.removeEventListener('touchcancel', onTouchEnd);
+    };
+    // Re-bind whenever the keyboard arms — armMirror flips pointer-events
+    // on the mirror and that's the state where the mirror starts swallowing
+    // touchmove. The cleanup function correctly removes the previous
+    // listeners; React calls it before re-running the effect.
+  }, [isTouch, keyboardArmed]);
 
   const handleMirrorInput = (e) => {
     const ta = mirrorRef.current;
@@ -446,20 +493,20 @@ export default function Terminal({ onReady, onInput, onResize }) {
         // canvas doesn't expose a DOM scroll target on its own, so we drive
         // scrollLines manually. Cell height estimated from fontSize × lineHeight
         // (no DOM grid to measure against, unlike the old xterm.js setup).
-        let touchStartY = null;
-        let touchStartX = null;
-        let touchAccum = 0;
-        let touchMovedTotal = 0;
+        // Accumulators live in component-scope refs (touchStartYRef etc.) so
+        // both the container and the mirror surface (when armed) drive the
+        // same scroll bucket — see the separate useEffect below that binds
+        // the mirror handlers after isTouch flips and the textarea is in DOM.
         const cellHeight = fontSize * 1.2;
         const onTouchStart = (e) => {
           if (e.touches.length !== 1) return;
-          touchStartY = e.touches[0].clientY;
-          touchStartX = e.touches[0].clientX;
-          touchAccum = 0;
-          touchMovedTotal = 0;
+          touchStartYRef.current = e.touches[0].clientY;
+          touchStartXRef.current = e.touches[0].clientX;
+          touchAccumRef.current = 0;
+          touchMovedTotalRef.current = 0;
         };
         const onTouchMove = (e) => {
-          if (touchStartY === null || e.touches.length !== 1) return;
+          if (touchStartYRef.current === null || e.touches.length !== 1) return;
           // Claim the gesture so iOS Safari can't interpret a vertical drag
           // as a page-scroll once ghostty's scrollback hits its edge. Without
           // this, dragging down past the bottom of the buffer let iOS pan
@@ -469,14 +516,14 @@ export default function Terminal({ onReady, onInput, onResize }) {
           if (e.cancelable) e.preventDefault();
           const y = e.touches[0].clientY;
           const x = e.touches[0].clientX;
-          touchMovedTotal += Math.abs(y - touchStartY) + Math.abs(x - (touchStartX ?? x));
-          touchAccum += touchStartY - y; // finger up = positive accum = scroll forward
-          touchStartY = y;
-          touchStartX = x;
-          const steps = Math.trunc(touchAccum / cellHeight);
+          touchMovedTotalRef.current += Math.abs(y - touchStartYRef.current) + Math.abs(x - (touchStartXRef.current ?? x));
+          touchAccumRef.current += touchStartYRef.current - y; // finger up = positive accum = scroll forward
+          touchStartYRef.current = y;
+          touchStartXRef.current = x;
+          const steps = Math.trunc(touchAccumRef.current / cellHeight);
           if (steps === 0) return;
           try { term.scrollLines(steps); } catch {}
-          touchAccum -= steps * cellHeight;
+          touchAccumRef.current -= steps * cellHeight;
           // After the scroll, update follow mode based on where we landed.
           // onScroll handles this too, but updating eagerly here avoids a
           // one-frame flicker of the chip during a quick flick.
@@ -491,8 +538,8 @@ export default function Terminal({ onReady, onInput, onResize }) {
           // currently down — reopening on every tap-while-typing would be
           // disruptive (the original reason auto-focus was removed).
           if (
-            touchStartY !== null &&
-            touchMovedTotal < 8 &&
+            touchStartYRef.current !== null &&
+            touchMovedTotalRef.current < 8 &&
             !keyboardArmedRef.current &&
             mirrorRef.current
           ) {
@@ -507,11 +554,15 @@ export default function Terminal({ onReady, onInput, onResize }) {
               setKeyboardArmed(true);
             } catch {}
           }
-          touchStartY = null;
-          touchStartX = null;
-          touchAccum = 0;
-          touchMovedTotal = 0;
+          touchStartYRef.current = null;
+          touchStartXRef.current = null;
+          touchAccumRef.current = 0;
+          touchMovedTotalRef.current = 0;
         };
+        // Expose the handlers + helpers via termRef so the separate
+        // mirror-binding useEffect (below) can wire them up after the
+        // mirror is in the DOM, on every (re)mount of Terminal.
+        termRef.current.__touchHandlers = { onTouchStart, onTouchMove, onTouchEnd };
         containerRef.current.addEventListener('touchstart', onTouchStart, { passive: true });
         // touchmove must be non-passive so onTouchMove can call preventDefault
         // and claim the gesture (see comment in the handler).
@@ -524,27 +575,10 @@ export default function Terminal({ onReady, onInput, onResize }) {
           containerRef.current?.removeEventListener('touchend', onTouchEnd);
           containerRef.current?.removeEventListener('touchcancel', onTouchEnd);
         });
-        // The hidden mirror textarea sits at `absolute inset-0 z-10` with
-        // pointer-events:auto whenever the soft keyboard is armed — iOS
-        // requires that to keep the keyboard up. The side-effect is that
-        // touchmove on the mirror never reaches the container handler above,
-        // so users can't scroll terminal history while the keyboard is open.
-        // Bridge the gesture: bind the SAME handlers on the mirror so a drag
-        // on the (transparent) mirror surface still drives term.scrollLines.
-        // The handlers are state-free across the two surfaces because the
-        // touchStart/Move/End closures share the touchStartY etc. accumulators.
-        if (mirrorRef.current) {
-          mirrorRef.current.addEventListener('touchstart', onTouchStart, { passive: true });
-          mirrorRef.current.addEventListener('touchmove', onTouchMove, { passive: false });
-          mirrorRef.current.addEventListener('touchend', onTouchEnd);
-          mirrorRef.current.addEventListener('touchcancel', onTouchEnd);
-          cleanups.push(() => {
-            mirrorRef.current?.removeEventListener('touchstart', onTouchStart);
-            mirrorRef.current?.removeEventListener('touchmove', onTouchMove);
-            mirrorRef.current?.removeEventListener('touchend', onTouchEnd);
-            mirrorRef.current?.removeEventListener('touchcancel', onTouchEnd);
-          });
-        }
+        // (Mirror touch-handler binding now lives in a separate useEffect
+        // keyed on `isTouch` — see below. Doing it here was unreliable on
+        // remount because the cached ghostty load promise resolved before
+        // the mirror was rendered after the isTouch state committed.)
 
         // Focus the actual textarea ghostty places inside the host. On mobile,
         // term.focus() alone can fail to open the soft keyboard because the
