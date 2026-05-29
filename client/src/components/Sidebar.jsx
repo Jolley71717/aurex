@@ -110,6 +110,7 @@ export default function Sidebar({
   onOpenPush,
   onOpenIdeas,
   onOpenBeads,
+  onOpenWatering,
   onOpenSettings,
   open,
   onClose,
@@ -224,6 +225,16 @@ export default function Sidebar({
             className="rounded-md border border-line bg-bg px-3 py-2 text-left text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
           >
             📿 Beads board
+          </button>
+        )}
+        {onOpenWatering && (
+          <button
+            onClick={onOpenWatering}
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => e.preventDefault()}
+            className="rounded-md border border-line bg-bg px-3 py-2 text-left text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
+          >
+            💧 Watering
           </button>
         )}
         {onOpenSettings && (

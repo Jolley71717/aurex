@@ -12,6 +12,7 @@ import { usePush } from './hooks/usePush.js';
 // BeadsPage pulls in the bead list + SSE machinery; terminal-only users
 // shouldn't pay the parse/eval cost. Lazy keeps it out of the initial bundle.
 const BeadsPage = lazy(() => import('./components/BeadsPage.jsx'));
+const WateringPage = lazy(() => import('./components/WateringPage.jsx'));
 
 function getInitialSessionId() {
   const params = new URLSearchParams(window.location.search);
@@ -64,6 +65,7 @@ function useSurface() {
     const path = window.location.pathname;
     if (path.startsWith('/ideas')) return 'ideas';
     if (path.startsWith('/beads')) return 'beads';
+    if (path.startsWith('/watering')) return 'watering';
     return 'terminal';
   };
   const [surface, setSurface] = useState(compute);
@@ -73,7 +75,14 @@ function useSurface() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
   const navigate = useCallback((next) => {
-    const target = next === 'ideas' ? '/ideas' : next === 'beads' ? '/beads' : '/';
+    const target =
+      next === 'ideas'
+        ? '/ideas'
+        : next === 'beads'
+          ? '/beads'
+          : next === 'watering'
+            ? '/watering'
+            : '/';
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target + window.location.search);
     }
@@ -266,6 +275,20 @@ export default function App() {
     );
   }
 
+  if (surface === 'watering') {
+    return (
+      <Suspense
+        fallback={
+          <div className="flex h-full w-full items-center justify-center bg-bg text-sm text-zinc-500">
+            loading watering…
+          </div>
+        }
+      >
+        <WateringPage onExit={() => navigate('terminal')} />
+      </Suspense>
+    );
+  }
+
   if (surface === 'settings') {
     return <SettingsPage onExit={() => navigate('terminal')} />;
   }
@@ -285,6 +308,7 @@ export default function App() {
         onOpenPush={() => setPushPanelOpen(true)}
         onOpenIdeas={() => navigate('ideas')}
         onOpenBeads={() => navigate('beads')}
+        onOpenWatering={() => navigate('watering')}
         onOpenSettings={() => navigate('settings')}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}

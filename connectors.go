@@ -43,6 +43,7 @@ const (
 	ConnectorTypeBeads     ConnectorType = "beads"
 	ConnectorTypeGasCity   ConnectorType = "gascity"
 	ConnectorTypeOllama    ConnectorType = "ollama"
+	ConnectorTypeHubspace  ConnectorType = "hubspace"
 )
 
 // Capability is what a Connector advertises it can do. Surfaces filter the
@@ -57,6 +58,9 @@ const (
 	CapLLM        Capability = "llm"
 	CapDashboard  Capability = "dashboard"
 	CapSupervisor Capability = "supervisor"
+	CapControl    Capability = "control"  // actuate a device (e.g. open a spigot)
+	CapSensor     Capability = "sensor"   // read device readings (battery, state)
+	CapSchedule   Capability = "schedule" // create/read recurring schedules
 )
 
 // Health is the cached probe result. UpdatedUnix is unset (0) until the first
@@ -310,9 +314,43 @@ func (m *ConnectorsManager) probeByType(ctx context.Context, c *Connector) Healt
 		return m.probeGasCity(ctx, c)
 	case ConnectorTypeOllama:
 		return m.probeOllama(ctx, c)
+	case ConnectorTypeHubspace:
+		return m.probeHubspace(ctx, c)
 	default:
 		return Health{Status: "unsupported_type", Detail: "no driver for type " + string(c.Type)}
 	}
+}
+
+// probeHubspace health-checks the local Python sidecar daemon (which wraps the
+// aioafero fork). The sidecar's /health endpoint is unauthenticated, but we
+// still send the bearer token when one is configured.
+func (m *ConnectorsManager) probeHubspace(ctx context.Context, c *Connector) Health {
+	if c.URL == "" {
+		return Health{Status: "misconfigured", Detail: "url is empty"}
+	}
+	url := strings.TrimRight(c.URL, "/") + "/health"
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return Health{Status: "error", Detail: err.Error()}
+	}
+	if c.TokenRef != "" {
+		if tok := readTokenFile(c.TokenRef); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+	}
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return Health{Status: "down", Detail: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return Health{Status: "unauthorized", Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+	}
+	if resp.StatusCode >= 300 {
+		return Health{Status: "down", Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	return Health{OK: true, Status: "healthy", Detail: truncateString(string(body), 120)}
 }
 
 func (m *ConnectorsManager) probePaperclip(ctx context.Context, c *Connector) Health {

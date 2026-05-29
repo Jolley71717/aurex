@@ -14,9 +14,10 @@ const TYPE_OPTIONS = [
   { value: 'beads',     label: 'Beads',     defaultURL: '',                       tokenLabel: '(not required)' },
   { value: 'gascity',   label: 'Gas City',  defaultURL: 'http://localhost:8372',  tokenLabel: '(not required)' },
   { value: 'ollama',    label: 'Ollama',    defaultURL: 'http://192.168.0.40:11434', tokenLabel: '(not required)' },
+  { value: 'hubspace',  label: 'Hubspace',  defaultURL: 'http://127.0.0.1:8523',  tokenLabel: 'Token file path' },
 ];
 
-const CAPABILITY_OPTIONS = ['agents', 'issues', 'ideas', 'llm', 'dashboard', 'supervisor'];
+const CAPABILITY_OPTIONS = ['agents', 'issues', 'ideas', 'llm', 'dashboard', 'supervisor', 'control', 'sensor', 'schedule'];
 
 const STATUS_TONE = {
   healthy:        'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',

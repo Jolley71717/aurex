@@ -125,6 +125,10 @@ func (s *Server) Routes() http.Handler {
 		// registered; the handlers themselves emit 503 if the token is
 		// missing.
 		RegisterPaperclipAgentRoutes(r)
+		// Hubspace watering surface — proxies to the local Python sidecar
+		// daemon. Always registered; handlers emit 503 if the sidecar token
+		// is missing (i.e. the sidecar isn't running).
+		RegisterHubspaceRoutes(r)
 	})
 
 	// Hook endpoint is intentionally NOT behind auth — it gates on localhost instead.

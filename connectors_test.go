@@ -371,3 +371,38 @@ func TestReadTokenFile_NonExistent(t *testing.T) {
 		t.Errorf("expected empty, got %q", got)
 	}
 }
+
+func TestProbeHubspace_HappyPath(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/health") {
+			http.Error(w, "wrong path", 404)
+			return
+		}
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"status":"ok","connected":true,"devices":9}`))
+	}))
+	defer upstream.Close()
+
+	m, _ := newMgr(t)
+	c, _ := m.Upsert(Connector{
+		Type:         ConnectorTypeHubspace,
+		Name:         "Hubspace",
+		URL:          upstream.URL,
+		Enabled:      true,
+		Capabilities: []Capability{CapControl, CapSensor, CapSchedule},
+	})
+
+	h := m.Probe(context.Background(), c.ID)
+	if !h.OK || h.Status != "healthy" {
+		t.Errorf("expected healthy, got %+v", h)
+	}
+}
+
+func TestProbeHubspace_Misconfigured(t *testing.T) {
+	m, _ := newMgr(t)
+	c, _ := m.Upsert(Connector{Type: ConnectorTypeHubspace, Name: "Hubspace", URL: "", Enabled: true})
+	h := m.Probe(context.Background(), c.ID)
+	if h.OK || h.Status != "misconfigured" {
+		t.Errorf("expected misconfigured, got %+v", h)
+	}
+}
