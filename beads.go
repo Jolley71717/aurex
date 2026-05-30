@@ -41,6 +41,7 @@ func NewBeadsManager(repoRoot string) *BeadsManager {
 // RegisterRoutes wires /api/beads/* onto an authenticated chi sub-router.
 func (m *BeadsManager) RegisterRoutes(r chi.Router) {
 	r.Get("/beads", m.handleList)
+	r.Get("/beads/graph", m.handleGraph)
 	r.Get("/beads/events", m.handleEvents)
 	r.Post("/beads", m.handleCreate)
 	r.Get("/beads/{id}", m.handleShow)
@@ -50,6 +51,103 @@ func (m *BeadsManager) RegisterRoutes(r chi.Router) {
 	r.Post("/beads/{id}/state", m.handleSetState)
 	r.Get("/beads/{id}/comments", m.handleListComments)
 	r.Post("/beads/{id}/comments", m.handleAddComment)
+}
+
+// --- go-live dependency graph ---
+
+// graphIssue is the subset of bd's --json shape the graph needs.
+type graphIssue struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Priority     int    `json:"priority"`
+	Status       string `json:"status"`
+	IssueType    string `json:"issue_type"`
+	Dependencies []struct {
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	} `json:"dependencies"`
+}
+
+type graphNode struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Priority int    `json:"priority"`
+	Status   string `json:"status"`
+	Type     string `json:"type"`
+}
+
+type graphEdge struct {
+	// From depends_on -> To dependent. i.e. From must be done before To
+	// (for blocks/blocked-by) or From is the parent epic of To (parent-child).
+	From string `json:"from"`
+	To   string `json:"to"`
+	Type string `json:"type"`
+}
+
+// handleGraph emits the open work as a dependency graph: every non-closed
+// issue is a node, every dependency edge between two open nodes is an edge.
+// This is the data the aurex Go-Live tracker renders. Closed issues (and edges
+// touching them) are dropped — a satisfied blocker isn't "left to do".
+func (m *BeadsManager) handleGraph(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := bdCtx()
+	defer cancel()
+	// --limit 1000 lifts bd's default 50-row cap so we get the full open set.
+	out, _, err := m.runBd(ctx, nil, "list", "--json", "--limit", "1000")
+	if err != nil {
+		jsonErr(w, http.StatusInternalServerError, "bd list failed")
+		return
+	}
+	var issues []graphIssue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		jsonErr(w, http.StatusInternalServerError, "parse bd list: "+err.Error())
+		return
+	}
+
+	open := make(map[string]bool, len(issues))
+	for _, is := range issues {
+		if !isClosed(is.Status) {
+			open[is.ID] = true
+		}
+	}
+
+	nodes := make([]graphNode, 0, len(open))
+	edges := make([]graphEdge, 0)
+	seen := make(map[string]bool)
+	for _, is := range issues {
+		if !open[is.ID] {
+			continue
+		}
+		nodes = append(nodes, graphNode{
+			ID:       is.ID,
+			Title:    is.Title,
+			Priority: is.Priority,
+			Status:   is.Status,
+			Type:     is.IssueType,
+		})
+		for _, d := range is.Dependencies {
+			from, to := d.DependsOnID, d.IssueID
+			if !open[from] || !open[to] {
+				continue // edge touches a closed/unknown node
+			}
+			key := from + "\x00" + to + "\x00" + d.Type
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			edges = append(edges, graphEdge{From: from, To: to, Type: d.Type})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes, "edges": edges})
+}
+
+func isClosed(status string) bool {
+	switch status {
+	case "closed", "CLOSED", "Closed":
+		return true
+	}
+	return false
 }
 
 // --- helpers ---

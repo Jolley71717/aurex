@@ -14,6 +14,7 @@ import { usePush } from './hooks/usePush.js';
 // shouldn't pay the parse/eval cost. Lazy keeps it out of the initial bundle.
 const BeadsPage = lazy(() => import('./components/BeadsPage.jsx'));
 const WateringPage = lazy(() => import('./components/WateringPage.jsx'));
+const GoLivePage = lazy(() => import('./components/GoLivePage.jsx'));
 
 function getInitialSessionId() {
   const params = new URLSearchParams(window.location.search);
@@ -67,6 +68,7 @@ function useSurface() {
     if (path.startsWith('/ideas')) return { surface: 'ideas', param: null };
     if (path.startsWith('/beads')) return { surface: 'beads', param: null };
     if (path.startsWith('/watering')) return { surface: 'watering', param: null };
+    if (path.startsWith('/golive')) return { surface: 'golive', param: null };
     if (path.startsWith('/settings')) return { surface: 'settings', param: null };
     const m = path.match(/^\/connector\/([^/]+)/);
     if (m) return { surface: 'connector', param: decodeURIComponent(m[1]) };
@@ -86,11 +88,13 @@ function useSurface() {
           ? '/beads'
           : next === 'watering'
             ? '/watering'
-            : next === 'settings'
-              ? '/settings'
-              : next === 'connector'
-                ? `/connector/${encodeURIComponent(param)}`
-                : '/';
+            : next === 'golive'
+              ? '/golive'
+              : next === 'settings'
+                ? '/settings'
+                : next === 'connector'
+                  ? `/connector/${encodeURIComponent(param)}`
+                  : '/';
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target + window.location.search);
     }
@@ -318,6 +322,20 @@ export default function App() {
     );
   }
 
+  if (surface === 'golive') {
+    return (
+      <Suspense
+        fallback={
+          <div className="flex h-full w-full items-center justify-center bg-bg text-sm text-zinc-500">
+            loading go-live tracker…
+          </div>
+        }
+      >
+        <GoLivePage onExit={() => navigate('terminal')} />
+      </Suspense>
+    );
+  }
+
   if (surface === 'settings') {
     return <SettingsPage onExit={() => navigate('terminal')} />;
   }
@@ -347,6 +365,7 @@ export default function App() {
         onOpenIdeas={() => navigate('ideas')}
         onOpenBeads={() => navigate('beads')}
         onOpenWatering={() => navigate('watering')}
+        onOpenGoLive={() => navigate('golive')}
         onOpenSettings={() => navigate('settings')}
         connectors={launchableConnectors}
         onOpenConnector={(id) => navigate('connector', id)}
