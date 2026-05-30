@@ -50,12 +50,39 @@ describe('GoLivePage', () => {
     fireEvent.click(screen.getByText('k3s-p0a'));
     // p0a is blocked by p1a (edge from p1a -> p0a)
     await waitFor(() => expect(screen.getByText(/Blocked by \/ parent \(1\)/)).toBeTruthy());
-    expect(screen.getByText('Critical security bug')).toBeTruthy();
+    // The title now appears in both the list row AND the detail aside — both
+    // are legitimate. Assert at least one rather than exactly one.
+    expect(screen.getAllByText('Critical security bug').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows an error when the fetch fails', async () => {
     global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500 });
     render(<GoLivePage onExit={() => {}} />);
     await waitFor(() => expect(screen.getByText(/Failed to load beads graph/)).toBeTruthy());
+  });
+
+  it('defaults to list view and flags ready vs blocked issues', async () => {
+    render(<GoLivePage onExit={() => {}} />);
+    await waitFor(() => expect(screen.getByText('k3s-p0a')).toBeTruthy());
+    // p0a is blocked by p1a → shows a blocker badge, not "ready".
+    // p1a has nothing blocking it → "ready". Exactly one ready badge among
+    // the default-visible P0/P1 set.
+    expect(screen.getAllByText('ready').length).toBe(1);
+    // The list shows full titles (the whole point of the list view).
+    expect(screen.getByText('High priority epic')).toBeTruthy();
+  });
+
+  it('toggles between list and graph views', async () => {
+    render(<GoLivePage onExit={() => {}} />);
+    await waitFor(() => expect(screen.getByText('k3s-p0a')).toBeTruthy());
+    // List view shows the ready/blocked badges; graph view does not.
+    expect(screen.getAllByText('ready').length).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: 'graph' }));
+    await waitFor(() => expect(screen.queryByText('ready')).toBeNull());
+    // node ids still render in the SVG
+    expect(screen.getByText('k3s-p0a')).toBeTruthy();
+    // flip back
+    fireEvent.click(screen.getByRole('button', { name: 'list' }));
+    await waitFor(() => expect(screen.getAllByText('ready').length).toBe(1));
   });
 });

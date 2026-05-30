@@ -91,6 +91,10 @@ export default function GoLivePage({ onExit }) {
   // Default: show the critical/near-critical set; P3/P4 off to cut clutter.
   const [enabled, setEnabled] = useState({ 0: true, 1: true, 2: true, 3: false, 4: false });
   const [selected, setSelected] = useState(null);
+  // 'list' | 'graph'. List is the default — it's the scannable "what's left
+  // to ship" view; the graph is the relationship view you flip to when you
+  // need to see what blocks what.
+  const [view, setView] = useState('list');
 
   useEffect(() => {
     let alive = true;
@@ -129,6 +133,40 @@ export default function GoLivePage({ onExit }) {
 
   const positions = useMemo(() => runForceLayout(nodes, edges), [nodes, edges]);
 
+  // For the list view: per-node blocker counts + a "ready" flag (nothing
+  // blocking it). "blocks" edges point from blocker → blocked, so an issue
+  // is blocked when it's the `to` of a non-parent edge. Computed over the
+  // FULL edge set (not the priority-filtered one) so hiding P3/P4 doesn't
+  // make a blocked P0 look ready. Sorted P0→P4, then ready-first within a
+  // priority so the actionable work floats up.
+  const listGroups = useMemo(() => {
+    const blockedByCount = {};
+    const blocksCount = {};
+    for (const e of data.edges) {
+      if ((e.type || '').includes('parent')) continue; // hierarchy, not a blocker
+      blockedByCount[e.to] = (blockedByCount[e.to] || 0) + 1;
+      blocksCount[e.from] = (blocksCount[e.from] || 0) + 1;
+    }
+    const rows = nodes.map((n) => ({
+      ...n,
+      blockedBy: blockedByCount[n.id] || 0,
+      blocks: blocksCount[n.id] || 0,
+      ready: (blockedByCount[n.id] || 0) === 0,
+    }));
+    const groups = [];
+    for (const p of [0, 1, 2, 3, 4]) {
+      const inP = rows
+        .filter((r) => r.priority === p)
+        .sort((a, b) => {
+          if (a.ready !== b.ready) return a.ready ? -1 : 1; // ready first
+          if (b.blocks !== a.blocks) return b.blocks - a.blocks; // unblocks-most first
+          return a.id.localeCompare(b.id);
+        });
+      if (inP.length) groups.push({ priority: p, rows: inP });
+    }
+    return groups;
+  }, [nodes, data.edges]);
+
   const selectedNode = selected ? data.nodes.find((n) => n.id === selected) : null;
   const blockedBy = selected ? edges.filter((e) => e.to === selected) : [];
   const blocks = selected ? edges.filter((e) => e.from === selected) : [];
@@ -138,12 +176,28 @@ export default function GoLivePage({ onExit }) {
     <div className="flex h-full w-full flex-col bg-bg text-zinc-100">
       <header className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-bg/95 px-4 py-3 backdrop-blur">
         <h1 className="text-sm font-semibold text-zinc-200">🚀 Go-Live tracker</h1>
-        <button
-          onClick={onExit}
-          className="rounded-md border border-line px-3 py-1.5 text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
-        >
-          ← Terminal
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="flex overflow-hidden rounded-md border border-line text-xs">
+            {['list', 'graph'].map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={[
+                  'px-3 py-1.5 capitalize',
+                  view === v ? 'bg-aura/15 text-aura' : 'text-zinc-400 hover:text-zinc-200',
+                ].join(' ')}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={onExit}
+            className="rounded-md border border-line px-3 py-1.5 text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
+          >
+            ← Terminal
+          </button>
+        </div>
       </header>
 
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2 text-xs">
@@ -181,7 +235,59 @@ export default function GoLivePage({ onExit }) {
               No issues at the selected priorities. Toggle a chip above.
             </div>
           )}
-          {!loading && !err && nodes.length > 0 && (
+          {!loading && !err && nodes.length > 0 && view === 'list' && (
+            <div className="space-y-4">
+              {listGroups.map((g) => (
+                <div key={g.priority}>
+                  <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                    <span className="inline-block h-2 w-2 rounded-full" style={{ background: prio(g.priority).hex }} />
+                    {prio(g.priority).name} · {g.rows.length}
+                  </div>
+                  <ul className="space-y-1">
+                    {g.rows.map((r) => {
+                      const t = prio(r.priority);
+                      const isSel = r.id === selected;
+                      const isEpic = r.type === 'epic';
+                      return (
+                        <li key={r.id}>
+                          <button
+                            onClick={() => setSelected(r.id === selected ? null : r.id)}
+                            className={[
+                              'flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left',
+                              isSel ? 'border-aura/50 bg-aura/10' : 'border-line bg-panel hover:border-zinc-600',
+                            ].join(' ')}
+                          >
+                            <span
+                              className="inline-block h-2 w-2 shrink-0 rounded-full"
+                              style={{ background: t.hex }}
+                            />
+                            <span className="shrink-0 font-mono text-[11px] text-zinc-400">{r.id}</span>
+                            <span className="min-w-0 flex-1 truncate text-xs text-zinc-100">{r.title}</span>
+                            {isEpic && (
+                              <span className="shrink-0 rounded border border-zinc-500/60 px-1 py-0.5 text-[9px] uppercase text-zinc-400">epic</span>
+                            )}
+                            {r.ready ? (
+                              <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-medium text-emerald-300">ready</span>
+                            ) : (
+                              <span className="shrink-0 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-amber-300" title={`${r.blockedBy} blocker(s)`}>
+                                ⛔ {r.blockedBy}
+                              </span>
+                            )}
+                            {r.blocks > 0 && (
+                              <span className="shrink-0 text-[9px] text-zinc-500" title={`blocks ${r.blocks} issue(s)`}>
+                                →{r.blocks}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+          {!loading && !err && nodes.length > 0 && view === 'graph' && (
             <svg viewBox={`0 0 ${W} ${H}`} className="block w-full" style={{ minHeight: '50vh' }}>
               {edges.map((e, i) => {
                 const a = positions[e.from];
@@ -279,7 +385,11 @@ export default function GoLivePage({ onExit }) {
         <span className="inline-flex items-center gap-1">
           <span className="inline-block h-2 w-2 rounded-full border border-zinc-300" /> epic
         </span>
-        <span className="ml-auto text-zinc-500">solid = blocks · dashed = parent/child · tap a node</span>
+        <span className="ml-auto text-zinc-500">
+          {view === 'graph'
+            ? 'solid = blocks · dashed = parent/child · tap a node'
+            : 'ready = nothing blocking · ⛔N = N blockers · →N = unblocks N · tap a row'}
+        </span>
       </div>
     </div>
   );
