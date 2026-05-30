@@ -1,11 +1,14 @@
-// ConnectorFrame embeds a connector's web UI in an iframe. The src is the
-// connector's launch_url — an aurex-side proxy path (/connector/{id}/ or /gc)
-// rather than the connector's raw origin, so it stays same-origin/same-scheme
-// and the proxy can strip frame-blocking headers (see connector_proxy.go).
+// ConnectorFrame embeds a connector's web UI in an iframe pointed at the
+// connector's real web_url — its own HTTPS origin at root (e.g. a tailscale
+// serve endpoint like https://<host>.ts.net:8443/), NOT a path-prefixed proxy.
 //
-// Some apps use an asset scheme the proxy can't perfectly rewrite, so we
-// always offer an "Open in new tab" escape hatch that targets the same proxy
-// path — reachable from anywhere aurex is, including a phone on the tailnet.
+// Why the real root URL and not an aurex proxy: connectors like Paperclip
+// route on location.pathname, so hosting them under /connector/{id} breaks
+// their router ("no company matches prefix CONNECTOR"). Embedding the origin
+// at root sidesteps that. It only works when (a) the connector is HTTPS (so an
+// HTTPS aurex page can embed it without a mixed-content block) and (b) it
+// doesn't send X-Frame-Options/CSP frame-ancestors. The "Open in new tab"
+// link is the escape hatch if a connector refuses to be framed.
 
 const ICONS = {
   paperclip: '📎',
@@ -20,7 +23,7 @@ export function connectorIcon(type) {
 }
 
 export default function ConnectorFrame({ connector, onExit }) {
-  const launchUrl = connector?.launch_url;
+  const launchUrl = connector?.web_url;
   const name = connector?.name || 'Integration';
   const icon = connectorIcon(connector?.type);
 

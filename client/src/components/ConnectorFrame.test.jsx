@@ -16,19 +16,19 @@ describe('ConnectorFrame', () => {
     id: 'paperclip-default',
     type: 'paperclip',
     name: 'Paperclip',
-    launch_url: '/connector/paperclip-default/',
+    web_url: 'https://host.tail.ts.net:8443/',
   };
 
-  it('embeds the launch_url in an iframe and offers a new-tab link', () => {
+  it('embeds the web_url in an iframe and offers a new-tab link', () => {
     render(<ConnectorFrame connector={paperclip} onExit={() => {}} />);
 
     const iframe = document.querySelector('iframe');
     expect(iframe).toBeTruthy();
-    expect(iframe.getAttribute('src')).toBe('/connector/paperclip-default/');
+    expect(iframe.getAttribute('src')).toBe('https://host.tail.ts.net:8443/');
     expect(iframe.getAttribute('title')).toBe('Paperclip');
 
     const newTab = screen.getByText(/Open in new tab/i);
-    expect(newTab.getAttribute('href')).toBe('/connector/paperclip-default/');
+    expect(newTab.getAttribute('href')).toBe('https://host.tail.ts.net:8443/');
     expect(newTab.getAttribute('target')).toBe('_blank');
   });
 

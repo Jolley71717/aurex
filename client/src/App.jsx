@@ -5,6 +5,7 @@ import Toolbar, { ctrlOf } from './components/Toolbar.jsx';
 import PushPanel from './components/PushPanel.jsx';
 import IdeasPage from './components/IdeasPage.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
+import ConnectorFrame from './components/ConnectorFrame.jsx';
 import TranscriptPanel from './components/TranscriptPanel.jsx';
 import { useSession } from './hooks/useSession.js';
 import { usePush } from './hooks/usePush.js';
@@ -69,6 +70,8 @@ function useSurface() {
     if (path.startsWith('/watering')) return { surface: 'watering', param: null };
     if (path.startsWith('/golive')) return { surface: 'golive', param: null };
     if (path.startsWith('/settings')) return { surface: 'settings', param: null };
+    const m = path.match(/^\/connector\/([^/]+)/);
+    if (m) return { surface: 'connector', param: decodeURIComponent(m[1]) };
     return { surface: 'terminal', param: null };
   };
   const [state, setState] = useState(compute);
@@ -89,7 +92,9 @@ function useSurface() {
               ? '/golive'
               : next === 'settings'
                 ? '/settings'
-                : '/';
+                : next === 'connector'
+                  ? `/connector/${encodeURIComponent(param)}`
+                  : '/';
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target + window.location.search);
     }
@@ -99,7 +104,7 @@ function useSurface() {
 }
 
 export default function App() {
-  const [surface, navigate] = useSurface();
+  const [surface, navigate, surfaceParam] = useSurface();
   const [sessions, setSessions] = useState([]);
   const [connectors, setConnectors] = useState([]);
   const [activeId, setActiveId] = useState(getInitialSessionId());
@@ -144,19 +149,6 @@ export default function App() {
 
   const launchableConnectors = useMemo(
     () => connectors.filter((c) => c.enabled && c.web_url),
-    [connectors]
-  );
-
-  // Open a connector at its real origin in a new tab. We deliberately do NOT
-  // embed via the /connector proxy: apps like Paperclip route on
-  // location.pathname, so hosting them under a path prefix breaks their router
-  // ("no company matches prefix CONNECTOR"). A top-level new-tab navigation to
-  // the real URL works even from the HTTPS page (only embedding is restricted).
-  const openConnector = useCallback(
-    (id) => {
-      const c = connectors.find((x) => x.id === id);
-      if (c?.web_url) window.open(c.web_url, '_blank', 'noopener,noreferrer');
-    },
     [connectors]
   );
 
@@ -348,6 +340,15 @@ export default function App() {
     return <SettingsPage onExit={() => navigate('terminal')} />;
   }
 
+  if (surface === 'connector') {
+    return (
+      <ConnectorFrame
+        connector={connectors.find((c) => c.id === surfaceParam) || null}
+        onExit={() => navigate('terminal')}
+      />
+    );
+  }
+
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-zinc-100">
       <Sidebar
@@ -367,7 +368,7 @@ export default function App() {
         onOpenGoLive={() => navigate('golive')}
         onOpenSettings={() => navigate('settings')}
         connectors={launchableConnectors}
-        onOpenConnector={openConnector}
+        onOpenConnector={(id) => navigate('connector', id)}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
