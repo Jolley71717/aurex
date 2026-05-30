@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -127,22 +128,45 @@ func connectorModifyResponse(prefix string) func(*http.Response) error {
 // the proxy) and rewrites root-absolute src/href/action references to the
 // proxy prefix (so bundlers that emit "/assets/..." still load).
 func rewriteConnectorHTML(body []byte, prefix string) []byte {
-	// Rewrite root-absolute asset refs FIRST, then inject <base> — otherwise
-	// the rewrite pass would clobber the base tag's own href.
+	// Rewrite root-absolute asset refs FIRST, then inject <head> shims —
+	// otherwise the rewrite pass would clobber the injected tags' own hrefs.
 	s := rewriteRootAbsolute(string(body), prefix)
 
+	// Inject (in order) a runtime URL-rebasing shim then a <base> tag, as the
+	// first children of <head> so they run before the app's own bundles.
+	//   - <base> handles document-relative URLs and HTML resources.
+	//   - the shim handles RUNTIME root-absolute calls (fetch/XHR/EventSource)
+	//     that <base> can't touch — without it an SPA's `fetch('/health')`
+	//     escapes the proxy prefix and 404s against aurex's root.
+	inject := connectorRuntimeShim(prefix)
 	if !strings.Contains(strings.ToLower(s), "<base ") {
-		baseTag := `<base href="` + prefix + `/">`
-		lower := strings.ToLower(s)
-		if i := strings.Index(lower, "<head"); i >= 0 {
-			if j := strings.Index(s[i:], ">"); j >= 0 {
-				pos := i + j + 1
-				s = s[:pos] + baseTag + s[pos:]
-			}
+		inject += `<base href="` + prefix + `/">`
+	}
+	lower := strings.ToLower(s)
+	if i := strings.Index(lower, "<head"); i >= 0 {
+		if j := strings.Index(s[i:], ">"); j >= 0 {
+			pos := i + j + 1
+			s = s[:pos] + inject + s[pos:]
 		}
 	}
 
 	return []byte(s)
+}
+
+// connectorRuntimeShim returns a <script> that monkey-patches fetch, XHR, and
+// EventSource so root-absolute URLs ("/api/x", "/health") are rewritten onto
+// the proxy prefix. Protocol-relative ("//cdn"), already-prefixed, and
+// document-relative URLs are left alone. This is what makes a prefix-unaware
+// SPA (e.g. Paperclip) work inside the /connector/{id} iframe.
+func connectorRuntimeShim(prefix string) string {
+	// prefix has no trailing slash here (e.g. /connector/paperclip-default).
+	p, _ := json.Marshal(prefix)
+	return `<script>(function(){var P=` + string(p) + `;` +
+		`function fix(u){return (typeof u==="string"&&u.charAt(0)==="/"&&u.charAt(1)!=="/"&&u.lastIndexOf(P+"/",0)!==0)?P+u:u;}` +
+		`var of=window.fetch;if(of){window.fetch=function(i,init){try{if(typeof i==="string"){i=fix(i);}else if(i&&i.url){i=new Request(fix(i.url),i);}}catch(e){}return of.call(this,i,init);};}` +
+		`var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{u=fix(u);}catch(e){}return xo.apply(this,[m,u].concat([].slice.call(arguments,2)));};` +
+		`if(window.EventSource){var ES=window.EventSource;window.EventSource=function(u,c){return new ES(fix(u),c);};window.EventSource.prototype=ES.prototype;}` +
+		`})();</script>`
 }
 
 // rewriteRootAbsolute prefixes root-absolute attribute values (src="/x",

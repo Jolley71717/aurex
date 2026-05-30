@@ -144,6 +144,13 @@ func TestProxyConnectorUI_StripsFramingAndRewritesHTML(t *testing.T) {
 	if !strings.Contains(html, `<base href="/connector/app/">`) {
 		t.Errorf("missing injected <base>:\n%s", html)
 	}
+	// The runtime shim must be injected so root-absolute fetch/XHR get rebased.
+	if !strings.Contains(html, `var P="/connector/app"`) {
+		t.Errorf("missing runtime URL-rebasing shim:\n%s", html)
+	}
+	if !strings.Contains(html, "window.fetch") || !strings.Contains(html, "XMLHttpRequest.prototype.open") {
+		t.Errorf("shim should patch fetch + XHR:\n%s", html)
+	}
 	if !strings.Contains(html, `src="/connector/app/assets/app.js"`) {
 		t.Errorf("root-absolute asset not prefixed:\n%s", html)
 	}
