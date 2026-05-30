@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { connectorIcon } from './ConnectorFrame.jsx';
 
 function SessionRow({ session, active, onSelect, onRename, onDelete }) {
   const branch = session.metadata?.branch;
@@ -112,6 +113,8 @@ export default function Sidebar({
   onOpenBeads,
   onOpenWatering,
   onOpenSettings,
+  connectors = [],
+  onOpenConnector,
   open,
   onClose,
 }) {
@@ -236,6 +239,34 @@ export default function Sidebar({
           >
             💧 Watering
           </button>
+        )}
+        {connectors.length > 0 && onOpenConnector && (
+          <div className="flex flex-col gap-2 border-t border-line pt-3">
+            <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+              Integrations
+            </div>
+            {connectors.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => onOpenConnector(c.id)}
+                onMouseDown={(e) => e.preventDefault()}
+                onTouchStart={(e) => e.preventDefault()}
+                title={`Open ${c.name}`}
+                className="flex items-center justify-between rounded-md border border-line bg-bg px-3 py-2 text-left text-xs text-zinc-300 hover:border-aura/40 hover:text-aura"
+              >
+                <span className="truncate">
+                  {connectorIcon(c.type)} {c.name}
+                </span>
+                <span
+                  className={[
+                    'ml-2 inline-block h-1.5 w-1.5 shrink-0 rounded-full',
+                    c.health?.ok ? 'bg-emerald-400' : 'bg-zinc-600',
+                  ].join(' ')}
+                  title={c.health?.ok ? 'healthy' : c.health?.status || 'unknown'}
+                />
+              </button>
+            ))}
+          </div>
         )}
         {onOpenSettings && (
           <button

@@ -87,6 +87,55 @@ type Connector struct {
 	Health       Health        `json:"health"`
 }
 
+// WebURL returns the browsable web-UI origin for this connector, or "" if it
+// has no embeddable UI. Most connectors carry it in Metadata["web_url"];
+// Paperclip's API origin (URL) doubles as its web UI, so we fall back to that
+// for installs seeded before web_url existed.
+func (c *Connector) WebURL() string {
+	if c == nil {
+		return ""
+	}
+	if c.Metadata != nil {
+		if w := c.Metadata["web_url"]; w != "" {
+			return w
+		}
+	}
+	if c.Type == ConnectorTypePaperclip {
+		return c.URL
+	}
+	return ""
+}
+
+// LaunchPath returns the in-app path the client should embed in an iframe to
+// open this connector's UI, or "" when the connector isn't launchable. Gas
+// City reuses its bespoke /gc reverse proxy (which rewrites the dashboard's
+// asset paths); everything else with a web URL goes through the generic
+// /connector/{id} proxy.
+func (c *Connector) LaunchPath() string {
+	if c == nil {
+		return ""
+	}
+	if c.Type == ConnectorTypeGasCity {
+		return "/gc"
+	}
+	if c.WebURL() != "" {
+		return "/connector/" + c.ID + "/"
+	}
+	return ""
+}
+
+// connectorView is the wire shape for connector reads: the stored Connector
+// plus the derived launch_url. We never persist launch_url (it's recomputed
+// from type + metadata), so it lives only in the HTTP responses.
+type connectorView struct {
+	*Connector
+	LaunchURL string `json:"launch_url,omitempty"`
+}
+
+func viewOf(c *Connector) connectorView {
+	return connectorView{Connector: c, LaunchURL: c.LaunchPath()}
+}
+
 // ConnectorsManager owns the in-memory list, file persistence, and the
 // background health-refresh loop. Construct one in main.go and pass to
 // Server; the routes and the refresh goroutine share it.
@@ -502,7 +551,12 @@ func (m *ConnectorsManager) RegisterRoutes(r chi.Router) {
 }
 
 func (m *ConnectorsManager) handleList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"connectors": m.List()})
+	list := m.List()
+	views := make([]connectorView, len(list))
+	for i, c := range list {
+		views[i] = viewOf(c)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connectors": views})
 }
 
 func (m *ConnectorsManager) handleGetOne(w http.ResponseWriter, r *http.Request) {
@@ -512,7 +566,7 @@ func (m *ConnectorsManager) handleGetOne(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, c)
+	writeJSON(w, http.StatusOK, viewOf(c))
 }
 
 func (m *ConnectorsManager) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -528,7 +582,7 @@ func (m *ConnectorsManager) handleCreate(w http.ResponseWriter, r *http.Request)
 	}
 	// Kick off a probe so the UI sees fresh health within seconds.
 	go m.Probe(context.Background(), c.ID)
-	writeJSON(w, http.StatusCreated, c)
+	writeJSON(w, http.StatusCreated, viewOf(c))
 }
 
 func (m *ConnectorsManager) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -570,7 +624,7 @@ func (m *ConnectorsManager) handleUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	go m.Probe(context.Background(), c.ID)
-	writeJSON(w, http.StatusOK, c)
+	writeJSON(w, http.StatusOK, viewOf(c))
 }
 
 func (m *ConnectorsManager) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -641,6 +695,10 @@ func DefaultConnectorsFromConfig(cfg *Config) []Connector {
 		TokenRef:     "/tmp/pcp-token",
 		Enabled:      true,
 		Capabilities: []Capability{CapAgents, CapIssues, CapIdeas},
+		// web_url is the browsable UI origin used by the in-app launcher
+		// (Sidebar button -> iframe through /connector/{id}). For Paperclip
+		// the API origin doubles as the web UI, so it matches URL.
+		Metadata: map[string]string{"web_url": "http://localhost:3100"},
 	})
 
 	// Beads — seed only if a repo root is configured.

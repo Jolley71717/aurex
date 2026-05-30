@@ -151,6 +151,17 @@ func (s *Server) Routes() http.Handler {
 		})
 	}
 
+	// Generic connector UI proxy: /connector/{id}/* embeds any connector with
+	// a browsable web_url (see connector_proxy.go). Gated by the same session
+	// middleware as /gc so only authenticated tailnet clients can reach it.
+	if s.connectors != nil {
+		r.Route("/connector/{id}", func(r chi.Router) {
+			r.Use(s.authMiddleware)
+			r.HandleFunc("/", s.connectors.proxyConnectorUI)
+			r.HandleFunc("/*", s.connectors.proxyConnectorUI)
+		})
+	}
+
 	// Embedded frontend last so /api/* and /ws/* take precedence.
 	r.Handle("/*", s.frontendHandler())
 

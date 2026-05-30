@@ -5,6 +5,7 @@ import Toolbar, { ctrlOf } from './components/Toolbar.jsx';
 import PushPanel from './components/PushPanel.jsx';
 import IdeasPage from './components/IdeasPage.jsx';
 import SettingsPage from './components/SettingsPage.jsx';
+import ConnectorFrame from './components/ConnectorFrame.jsx';
 import TranscriptPanel from './components/TranscriptPanel.jsx';
 import { useSession } from './hooks/useSession.js';
 import { usePush } from './hooks/usePush.js';
@@ -61,20 +62,23 @@ function useKeyboardInset() {
 // when the user toggles between surfaces.
 function useSurface() {
   const compute = () => {
-    if (typeof window === 'undefined') return 'terminal';
+    if (typeof window === 'undefined') return { surface: 'terminal', param: null };
     const path = window.location.pathname;
-    if (path.startsWith('/ideas')) return 'ideas';
-    if (path.startsWith('/beads')) return 'beads';
-    if (path.startsWith('/watering')) return 'watering';
-    return 'terminal';
+    if (path.startsWith('/ideas')) return { surface: 'ideas', param: null };
+    if (path.startsWith('/beads')) return { surface: 'beads', param: null };
+    if (path.startsWith('/watering')) return { surface: 'watering', param: null };
+    if (path.startsWith('/settings')) return { surface: 'settings', param: null };
+    const m = path.match(/^\/connector\/([^/]+)/);
+    if (m) return { surface: 'connector', param: decodeURIComponent(m[1]) };
+    return { surface: 'terminal', param: null };
   };
-  const [surface, setSurface] = useState(compute);
+  const [state, setState] = useState(compute);
   useEffect(() => {
-    const onPop = () => setSurface(compute());
+    const onPop = () => setState(compute());
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
-  const navigate = useCallback((next) => {
+  const navigate = useCallback((next, param = null) => {
     const target =
       next === 'ideas'
         ? '/ideas'
@@ -82,18 +86,23 @@ function useSurface() {
           ? '/beads'
           : next === 'watering'
             ? '/watering'
-            : '/';
+            : next === 'settings'
+              ? '/settings'
+              : next === 'connector'
+                ? `/connector/${encodeURIComponent(param)}`
+                : '/';
     if (window.location.pathname !== target) {
       window.history.pushState({}, '', target + window.location.search);
     }
-    setSurface(next);
+    setState({ surface: next, param });
   }, []);
-  return [surface, navigate];
+  return [state.surface, navigate, state.param];
 }
 
 export default function App() {
-  const [surface, navigate] = useSurface();
+  const [surface, navigate, surfaceParam] = useSurface();
   const [sessions, setSessions] = useState([]);
+  const [connectors, setConnectors] = useState([]);
   const [activeId, setActiveId] = useState(getInitialSessionId());
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pushPanelOpen, setPushPanelOpen] = useState(false);
@@ -118,6 +127,26 @@ export default function App() {
   useEffect(() => {
     refreshSessions();
   }, [refreshSessions]);
+
+  // Pull the connector registry once so the sidebar can render a launcher
+  // button per enabled, launchable integration (one with a web UI to embed).
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/connectors')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (alive && data) setConnectors(data.connectors || []);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const launchableConnectors = useMemo(
+    () => connectors.filter((c) => c.enabled && c.launch_url),
+    [connectors]
+  );
 
   useEffect(() => {
     setUrlSession(activeId);
@@ -293,6 +322,15 @@ export default function App() {
     return <SettingsPage onExit={() => navigate('terminal')} />;
   }
 
+  if (surface === 'connector') {
+    return (
+      <ConnectorFrame
+        connector={connectors.find((c) => c.id === surfaceParam) || null}
+        onExit={() => navigate('terminal')}
+      />
+    );
+  }
+
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-zinc-100">
       <Sidebar
@@ -310,6 +348,8 @@ export default function App() {
         onOpenBeads={() => navigate('beads')}
         onOpenWatering={() => navigate('watering')}
         onOpenSettings={() => navigate('settings')}
+        connectors={launchableConnectors}
+        onOpenConnector={(id) => navigate('connector', id)}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
