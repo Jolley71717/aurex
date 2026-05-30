@@ -151,16 +151,10 @@ func (s *Server) Routes() http.Handler {
 		})
 	}
 
-	// Generic connector UI proxy: /connector/{id}/* embeds any connector with
-	// a browsable web_url (see connector_proxy.go). Gated by the same session
-	// middleware as /gc so only authenticated tailnet clients can reach it.
-	if s.connectors != nil {
-		r.Route("/connector/{id}", func(r chi.Router) {
-			r.Use(s.authMiddleware)
-			r.HandleFunc("/", s.connectors.proxyConnectorUI)
-			r.HandleFunc("/*", s.connectors.proxyConnectorUI)
-		})
-	}
+	// NB: the in-app connector iframe proxy (/connector/{id}) was removed —
+	// connectors that route on location.pathname (e.g. Paperclip) can't be
+	// hosted under a path prefix. The sidebar launcher opens them in a new tab
+	// at their real origin instead (see web_url in connectors.go).
 
 	// Embedded frontend last so /api/* and /ws/* take precedence.
 	r.Handle("/*", s.frontendHandler())
