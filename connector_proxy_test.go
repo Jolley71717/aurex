@@ -43,10 +43,10 @@ func TestConnector_WebURL_And_LaunchPath(t *testing.T) {
 			wantPath: "/connector/x/",
 		},
 		{
-			name:     "gascity reuses the /gc proxy",
+			name:     "gascity uses its dashboard_url, launches via /gc proxy",
 			c:        Connector{ID: "gascity-default", Type: ConnectorTypeGasCity, URL: "http://sup", Metadata: map[string]string{"dashboard_url": "http://dash"}},
-			wantWeb:  "", // gascity has no generic web_url; it launches via /gc
-			wantPath: "/gc",
+			wantWeb:  "http://dash", // real dashboard origin (new-tab launch target)
+			wantPath: "/gc",         // in-app embed still uses the bespoke /gc proxy
 		},
 		{
 			name:     "beads has no web UI",
@@ -92,6 +92,10 @@ func TestHandleList_IncludesLaunchURL(t *testing.T) {
 	}
 	if got := body.Connectors[0]["launch_url"]; got != "/connector/paperclip-default/" {
 		t.Errorf("launch_url = %v, want /connector/paperclip-default/", got)
+	}
+	// web_url is the real origin the launcher opens in a new tab.
+	if got := body.Connectors[0]["web_url"]; got != "http://localhost:3100" {
+		t.Errorf("web_url = %v, want http://localhost:3100", got)
 	}
 
 	// launch_url must NOT be persisted to disk.

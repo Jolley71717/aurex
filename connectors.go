@@ -99,6 +99,13 @@ func (c *Connector) WebURL() string {
 		if w := c.Metadata["web_url"]; w != "" {
 			return w
 		}
+		// Gas City keeps its browsable dashboard origin separate from the
+		// supervisor API (URL).
+		if c.Type == ConnectorTypeGasCity {
+			if w := c.Metadata["dashboard_url"]; w != "" {
+				return w
+			}
+		}
 	}
 	if c.Type == ConnectorTypePaperclip {
 		return c.URL
@@ -129,11 +136,17 @@ func (c *Connector) LaunchPath() string {
 // from type + metadata), so it lives only in the HTTP responses.
 type connectorView struct {
 	*Connector
+	// WebURL is the connector's real browsable origin. The launcher opens it
+	// in a new tab — unlike the proxied LaunchURL, this works for SPAs that
+	// route on location.pathname (e.g. Paperclip), which can't be hosted under
+	// a path prefix. LaunchURL is kept for embed-friendly apps / direct deep
+	// links through the /connector proxy.
+	WebURL    string `json:"web_url,omitempty"`
 	LaunchURL string `json:"launch_url,omitempty"`
 }
 
 func viewOf(c *Connector) connectorView {
-	return connectorView{Connector: c, LaunchURL: c.LaunchPath()}
+	return connectorView{Connector: c, WebURL: c.WebURL(), LaunchURL: c.LaunchPath()}
 }
 
 // ConnectorsManager owns the in-memory list, file persistence, and the

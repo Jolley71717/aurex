@@ -148,7 +148,20 @@ export default function App() {
   }, []);
 
   const launchableConnectors = useMemo(
-    () => connectors.filter((c) => c.enabled && c.launch_url),
+    () => connectors.filter((c) => c.enabled && c.web_url),
+    [connectors]
+  );
+
+  // Open a connector at its real origin in a new tab. We deliberately do NOT
+  // embed via the /connector proxy: apps like Paperclip route on
+  // location.pathname, so hosting them under a path prefix breaks their router
+  // ("no company matches prefix CONNECTOR"). A top-level new-tab navigation to
+  // the real URL works even from the HTTPS page (only embedding is restricted).
+  const openConnector = useCallback(
+    (id) => {
+      const c = connectors.find((x) => x.id === id);
+      if (c?.web_url) window.open(c.web_url, '_blank', 'noopener,noreferrer');
+    },
     [connectors]
   );
 
@@ -368,7 +381,7 @@ export default function App() {
         onOpenGoLive={() => navigate('golive')}
         onOpenSettings={() => navigate('settings')}
         connectors={launchableConnectors}
-        onOpenConnector={(id) => navigate('connector', id)}
+        onOpenConnector={openConnector}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
