@@ -1,5 +1,13 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { FitAddon, Ghostty, Terminal as GhosttyTerminal } from 'ghostty-web';
+import {
+  diffToPayload,
+  mirrorPad,
+  stripPad,
+  padCount,
+  MIRROR_PAD_LEN,
+  MIRROR_PAD_MIN,
+} from './terminalMirror.js';
 
 // Diagnostic overlay for mobile input events — opt in via ?debug=input. Keeps
 // the plumbing around so a future regression can be inspected without a code
@@ -142,20 +150,40 @@ export default function Terminal({ onReady, onInput, onResize }) {
     if (!ta) return;
     const newVal = ta.value;
     const oldVal = lastSentRef.current;
-    // Longest common prefix
-    let i = 0;
-    const minLen = Math.min(oldVal.length, newVal.length);
-    while (i < minLen && oldVal.charCodeAt(i) === newVal.charCodeAt(i)) i++;
-    const backspaces = oldVal.length - i;
-    const additions = newVal.slice(i);
-    pushDbg('mi', { it: e?.nativeEvent?.inputType, ol: oldVal.length, nl: newVal.length, bs: backspaces, ad: additions.slice(0, 8) });
-    if (backspaces > 0 || additions) {
-      let payload = '';
-      if (backspaces > 0) payload = '\x7f'.repeat(backspaces);
-      payload += additions;
-      onInputRef.current?.(payload);
-    }
+    const payload = diffToPayload(oldVal, newVal);
+    pushDbg('mi', { it: e?.nativeEvent?.inputType, ol: oldVal.length, nl: newVal.length, pl: payload.length });
+    if (payload) onInputRef.current?.(payload);
     lastSentRef.current = newVal;
+    // Top the zero-width pad back up if a held delete has eaten into it, so the
+    // next press-and-hold never runs out of chars for iOS auto-repeat to chew.
+    maybeReplenishPad();
+  };
+
+  // Keep the mirror prefixed with a run of zero-width pad chars (see
+  // terminalMirror.js). seedMirror is called whenever the soft keyboard arms;
+  // maybeReplenishPad tops it up as the user deletes into it. Both resync
+  // lastSentRef to the new value so the pad change itself emits nothing.
+  const seedMirror = () => {
+    const ta = mirrorRef.current;
+    if (!ta) return;
+    ta.value = mirrorPad() + stripPad(ta.value);
+    try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch {}
+    lastSentRef.current = ta.value;
+  };
+  const maybeReplenishPad = () => {
+    const ta = mirrorRef.current;
+    if (!ta) return;
+    if (padCount(ta.value) >= MIRROR_PAD_MIN) return;
+    // Only top up with the caret at the very end, so we never shift text out
+    // from under a mid-line caret (which would corrupt the diff).
+    const atEnd = ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length;
+    if (!atEnd) return;
+    ta.value = mirrorPad() + stripPad(ta.value);
+    try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch {}
+    lastSentRef.current = ta.value;
+  };
+  const handleMirrorKeyUp = (e) => {
+    if (e.key === 'Backspace') maybeReplenishPad();
   };
 
   // Native beforeinput listener — installed via useEffect below so we get the
@@ -189,11 +217,20 @@ export default function Terminal({ onReady, onInput, onResize }) {
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       onInputRef.current?.('\r');
-      if (mirrorRef.current) mirrorRef.current.value = '';
-      lastSentRef.current = '';
+      if (mirrorRef.current) {
+        // Reset to a fresh pad (not empty) so the next held delete still has
+        // zero-width chars for iOS auto-repeat to consume.
+        mirrorRef.current.value = mirrorPad();
+        try { mirrorRef.current.setSelectionRange(MIRROR_PAD_LEN, MIRROR_PAD_LEN); } catch {}
+      }
+      lastSentRef.current = mirrorPad();
       return;
     }
-    // Backspace handling has two cases:
+    // Backspace handling has two cases. NOTE: with the zero-width pad
+    // (seedMirror / maybeReplenishPad) the mirror is virtually never empty, so
+    // Case 2 is the normal path even when deleting server-side text — that's
+    // what lets iOS press-and-hold auto-repeat keep going. Case 1 is now only a
+    // fallback for the rare moment the pad is fully exhausted.
     //
     //  1. Mirror is empty but the server's prompt has text the user didn't
     //     type locally (e.g. they reconnected to a session with text in
@@ -560,6 +597,7 @@ export default function Terminal({ onReady, onInput, onResize }) {
               mirrorRef.current.focus({ preventScroll: true });
               keyboardArmedRef.current = true;
               setKeyboardArmed(true);
+              seedMirror();
             } catch {}
           }
           touchStartYRef.current = null;
@@ -664,6 +702,7 @@ export default function Terminal({ onReady, onInput, onResize }) {
           }
           keyboardArmedRef.current = true;
           setKeyboardArmed(true);
+          seedMirror();
         };
         const blurTerm = () => {
           keyboardArmedRef.current = false;
@@ -782,6 +821,7 @@ export default function Terminal({ onReady, onInput, onResize }) {
           }}
           onInput={handleMirrorInput}
           onKeyDown={handleMirrorKeyDown}
+          onKeyUp={handleMirrorKeyUp}
         />
       )}
       {DEBUG_INPUT && (

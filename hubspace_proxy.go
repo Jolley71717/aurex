@@ -23,7 +23,7 @@ import (
 //   POST   /api/hubspace/devices/{id}/spigot/{instance}/stop
 //   GET    /api/hubspace/schedules
 //   POST   /api/hubspace/schedules
-//   DELETE /api/hubspace/schedules/{ruleId}
+//   DELETE /api/hubspace/devices/{id}/events/{eventId}
 
 const (
 	defaultHubspaceSidecarURL  = "http://127.0.0.1:8523"
@@ -67,8 +67,9 @@ func RegisterHubspaceRoutes(r chi.Router) {
 	r.Post("/hubspace/schedules", func(w http.ResponseWriter, r *http.Request) {
 		proxyToSidecar(w, r, "POST", "/v1/schedules")
 	})
-	r.Delete("/hubspace/schedules/{ruleId}", func(w http.ResponseWriter, r *http.Request) {
-		proxyToSidecar(w, r, "DELETE", "/v1/schedules/"+chi.URLParam(r, "ruleId"))
+	r.Delete("/hubspace/devices/{id}/events/{eventId}", func(w http.ResponseWriter, r *http.Request) {
+		proxyToSidecar(w, r, "DELETE",
+			"/v1/devices/"+chi.URLParam(r, "id")+"/events/"+chi.URLParam(r, "eventId"))
 	})
 }
 
