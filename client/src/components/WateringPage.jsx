@@ -32,7 +32,7 @@ async function api(path, opts) {
 const PLANTS = {
   'front flowerz': { 'spigot-1': 'Sunflowers (Great Divide)', 'spigot-2': 'House flowers' },
   'watter those': { 'spigot-1': 'Corner flowers', 'spigot-2': 'Road flowers' },
-  'walled garden': { 'spigot-1': 'Manual hose', 'spigot-2': 'Fire Fence' },
+  'walled garden': { 'spigot-1': 'House flowers 2', 'spigot-2': 'Fire Fence' },
   pumpkorn: { 'spigot-1': 'Pumpkins', 'spigot-2': 'Sweet corn' },
   'garlick deez nuts': { 'spigot-1': 'Elephant garlic', 'spigot-2': 'Caragana' },
   'da-me-tree': { 'spigot-1': 'Shade trees', 'spigot-2': 'Garden' },
