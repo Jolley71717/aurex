@@ -410,7 +410,18 @@ export default function App() {
               beads
             </button>
             <button
-              onClick={() => setTranscriptOpen(true)}
+              onClick={() => {
+                // iOS WebKit refuses to start long-press text selection
+                // anywhere on the page while an editable element holds
+                // focus — and the terminal keeps its hidden textarea
+                // (ghostty's input or the mobile mirror) focused at all
+                // times. Blur it before opening the transcript so its text
+                // is actually selectable/copyable. blur() also disarms the
+                // mirror + ghostty host, so the soft keyboard drops away
+                // for reading; tapping the terminal re-arms it as usual.
+                termHandleRef.current?.blur?.();
+                setTranscriptOpen(true);
+              }}
               onMouseDown={(e) => e.preventDefault()}
               onTouchStart={(e) => e.preventDefault()}
               disabled={!activeSession}
